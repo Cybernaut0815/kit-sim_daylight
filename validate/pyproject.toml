@@ -1,0 +1,20 @@
+[project]
+name = "daylight-validate"
+version = "0.1.0"
+description = "Validation harness for the daylight CLI against Ladybug Tools / Radiance rad5R4 / pvlib"
+requires-python = "==3.12.*"
+dependencies = [
+  "ladybug-radiance==0.2.12",
+  "ladybug-core==0.44.62",
+  "ladybug-geometry==1.35.6",
+  "numpy",
+  "pvlib==0.16.1",
+  "usd-core==26.8",
+  "daylight",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+daylight = { path = "../bindings/python", editable = true }

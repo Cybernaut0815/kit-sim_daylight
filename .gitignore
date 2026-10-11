@@ -1,0 +1,7 @@
+build*/
+validate/_dl/
+validate/_out/
+.venv/
+__pycache__/
+node_modules/
+dist/

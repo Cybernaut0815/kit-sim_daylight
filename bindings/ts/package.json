@@ -1,0 +1,28 @@
+{
+  "name": "daylight-mesh",
+  "version": "0.1.0",
+  "private": true,
+  "description": "three.js / glTF meshes -> daylight core .dmesh / OBJ, plus a Node runner for daylight.exe",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@gltf-transform/core": "^4.2.1"
+  },
+  "peerDependencies": {
+    "three": ">=0.150.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/three": "^0.186.0",
+    "three": "^0.186.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

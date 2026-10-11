@@ -1,0 +1,80 @@
+#usda 1.0
+(
+    upAxis = "Y"
+    metersPerUnit = 0.01
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    double3 xformOp:translate = (100, 200, 300)
+    float xformOp:rotateY = 90
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY"]
+
+    def Mesh "Box"
+    {
+        point3f[] points = [(-50, -50, -50), (50, -50, -50), (50, 50, -50), (-50, 50, -50), (-50, -50, 50), (50, -50, 50), (50, 50, 50), (-50, 50, 50)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 3, 2, 1, 4, 5, 6, 7, 0, 1, 5, 4, 3, 7, 6, 2, 0, 4, 7, 3, 1, 2, 6, 5]
+        normal3f[] normals = [(-0.57735027, -0.57735027, -0.57735027), (0.57735027, -0.57735027, -0.57735027), (0.57735027, 0.57735027, -0.57735027), (-0.57735027, 0.57735027, -0.57735027), (-0.57735027, -0.57735027, 0.57735027), (0.57735027, -0.57735027, 0.57735027), (0.57735027, 0.57735027, 0.57735027), (-0.57735027, 0.57735027, 0.57735027)] (
+            interpolation = "vertex"
+        )
+    }
+
+    def Mesh "BoxLeft"
+    {
+        float3 xformOp:scale = (-1, 1, 1)
+        uniform token[] xformOpOrder = ["xformOp:scale"]
+        uniform token orientation = "leftHanded"
+        point3f[] points = [(-50, -50, -50), (50, -50, -50), (50, 50, -50), (-50, 50, -50), (-50, -50, 50), (50, -50, 50), (50, 50, 50), (-50, 50, 50)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+        normal3f[] primvars:normals = [(0, 0, -1), (0, 0, 1), (0, -1, 0), (0, 1, 0), (-1, 0, 0), (1, 0, 0)] (
+            interpolation = "uniform"
+        )
+    }
+
+    def Mesh "Hidden"
+    {
+        token visibility = "invisible"
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0)]
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+    }
+
+    def Mesh "Guide"
+    {
+        uniform token purpose = "guide"
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0)]
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+    }
+
+    def Mesh "Inactive" (
+        active = false
+    )
+    {
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0)]
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+    }
+
+    def Xform "HiddenGroup"
+    {
+        token visibility = "invisible"
+        def Mesh "Child"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+        }
+    }
+}
+
+def Mesh "Floor"
+{
+    uniform token orientation = "leftHanded"
+    point3f[] points = [(-1000, 0, -1000), (1000, 0, -1000), (1000, 0, 1000), (-1000, 0, 1000)]
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+}
