@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 import { existsSync } from 'node:fs';
 import { Document, NodeIO } from '@gltf-transform/core';
 import { BoxGeometry, Mesh } from 'three';

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 """Reference data for compare.py -> validate/_out/ref/. Needs setup.py and fixtures.py first.
 
   uv run reference.py [--epw STEM ...] [--scene NAME ...] [--all]      default: Boston + Chicago, all scenes

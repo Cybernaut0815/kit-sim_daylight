@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 """python -m daylight STAGE [--sensors PREFIX]... [--context PREFIX]... [--time T] -o DIR [--write-usd PATH] [-- <core flags>]
 
 Writes DIR/<stem>.dmesh per mesh (stem = prim path with [^A-Za-z0-9._-] -> '_', leading '_' stripped, made unique

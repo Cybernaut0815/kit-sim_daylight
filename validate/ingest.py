@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 """Ingest benchmark on a 1000x1000 quad grid (1 002 001 points, 2M triangles) -> _out/ingest/grid.{dmesh,obj,usdc,usda}.
 
   uv run python -I ingest.py --exe ../build/RelWithDebInfo/daylight.exe

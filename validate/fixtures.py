@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 """Scenes as ladybug-geometry Mesh3D -> validate/_out/fixtures/<scene>/{sensors.obj, context.obj, fixture.json}
 plus usd_xform/usd_xform.usda (the box scene re-authored in USD for the Python binding, compare.py layer 6).
 fixture.json holds the raw vertices / faces and the ladybug sensors (face_centroids / face_normals / vertex_normals)

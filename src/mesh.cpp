@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // OBJ / .dmesh readers, triangulation (earcut for n-gons), sensor derivation (ladybug / physical rules).
 #include "internal.h"
 #include <algorithm>

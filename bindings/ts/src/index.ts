@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // daylight-mesh: three.js / glTF meshes -> .dmesh / OBJ for the daylight core CLI, plus a Node runner.
 // Core contract: world metres, Z-up, right-handed winding; .dmesh = one mesh per file, OBJ = one `o` group per mesh.
 import { NodeIO, Primitive } from '@gltf-transform/core';

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // Ports of Radiance rad5R4 code: gendaymtx.c (ComputeSky, AddDirect, rh_init, Perez model), sun.c (sdec,
 // stadj, salt, sazi), tcos.c (table sine used by rh_cos) and the color.h / fvect.h macros they rely on.
 // Radiance is distributed under the Radiance Software License, Version 2.0:

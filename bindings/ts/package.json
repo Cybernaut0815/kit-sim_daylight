@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "three.js / glTF meshes -> daylight core .dmesh / OBJ, plus a Node runner for daylight.exe",
-  "license": "MIT",
+  "license": "Apache-2.0 AND LicenseRef-Commons-Clause-1.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

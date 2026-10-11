@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // Assert-style checks, run by ctest. Each module owns tests/check_<module>.cpp; each returns its failure count.
 #include <cstdio>
 int check_sky(const char* testsDir);

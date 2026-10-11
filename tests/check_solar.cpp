@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // Checks for solar.cpp: NOAA sun vs ladybug Sunpath goldens, EPW reader, steps, timestamp parsing.
 #include "internal.h"
 #include <cmath>

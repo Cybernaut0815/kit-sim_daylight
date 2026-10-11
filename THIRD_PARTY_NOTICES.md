@@ -1,6 +1,6 @@
 # Third-party notices
 
-This project (MIT, see LICENSE) contains or uses the following third-party material.
+This project (Apache 2.0 with the Commons Clause, see LICENSE) contains or uses the following third-party material.
 
 ## Radiance (gendaymtx.c, sun.c, color.h) -- ported code in src/sky.cpp
 

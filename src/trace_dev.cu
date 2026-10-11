@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // OptiX device program, compiled to OptiX-IR and embedded. One launch index per (sensor i, 32-direction word w):
 // bit k of bits[w*nc + i] = direction w*32+k is in the sensor's hemisphere and unoccluded.
 #include <optix.h>

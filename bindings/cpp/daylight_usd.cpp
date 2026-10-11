@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // USD reader: LightUSD composed stage (sublayers, references, payloads, ...) -> Mesh[] in world metres, Z-up.
 #include "daylight_usd.h"
 #pragma warning(push)

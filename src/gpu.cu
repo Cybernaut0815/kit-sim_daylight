@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // OptiX host side (context, pipeline from the embedded OptiX-IR, SBT, compacted GAS, TDR-safe sub-launches) and the
 // plain CUDA reduce / series kernels. Everything runs on the legacy default stream with synchronous copies.
 // ponytail: one stream + synchronous D2H; double-buffer the series copy if it ever exceeds ~1 s per 1e6 sensors.

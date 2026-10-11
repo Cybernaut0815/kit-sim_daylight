@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 """Run the daylight CLI (daylight.exe) on mesh files or raw arrays (.dmesh) and load its values + manifest."""
 import json
 import os

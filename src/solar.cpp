@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // NOAA solar position with ladybug Sunpath semantics, EPW reader, Ineichen clear sky, evaluation steps. Equations are
 // the public-domain NOAA solar calculator (Meeus) chain, written from the NOAA spreadsheet; no ladybug code.
 #include "internal.h"

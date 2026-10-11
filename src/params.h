@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // Launch parameters shared by the OptiX device program (trace_dev.cu) and the host (gpu.cu).
 #pragma once
 #include <optix_types.h>

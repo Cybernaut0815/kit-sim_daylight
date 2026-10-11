@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // USD stage -> daylight::Mesh[] (LightUSD). Optional binding, not part of the core (bindings/cpp/CMakeLists.txt).
 #pragma once
 #include "daylight.h"

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 """Run the daylight CLI against the references (plan section 8) and print a per-case table.
 
   uv run compare.py <sky|sun|bits|e2e|usd|analytic|clearsky|all|selftest> --exe PATH [--epw STEM ...] [--scene NAME ...]

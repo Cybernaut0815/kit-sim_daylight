@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 """Fetch the validation inputs into validate/_dl (gitignored): Radiance rad5R4 portable zip and EPW files.
 
 Run from validate/: uv run setup.py. Idempotent: existing downloads are kept; sha256.txt is rewritten.

@@ -34,4 +34,4 @@ daylight::read_epw("boston.epw", w, err) && daylight::run(meshes, &w, daylight::
 ```
 
 Speed (1M quads, 1 002 001 points, `-v` "info: read"): `.usdc` 0.10 s, `.usda` 0.58 s (LightUSD, zero-copy
-attribute refs); the Python converter is only needed for stages LightUSD cannot compose (see root README).
+attribute refs); the Python converter is only needed for stages LightUSD cannot compose (see [docs/api.md](../../docs/api.md)).

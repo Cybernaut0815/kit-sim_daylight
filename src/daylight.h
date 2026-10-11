@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // daylight: GPU annual daylight / solar simulation. Public API: generic face-vertex mesh in, value list out.
 #pragma once
 #include <cmath>

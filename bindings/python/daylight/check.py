@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 """python -m daylight.check: `to_dmesh` round trip and hole / winding / degenerate-face masking on an in-memory
 stage (no exe needed), then convert validate/_out/fixtures/usd_xform/usd_xform.usda (fixtures.py) and compare
 counts, winding and world points with values derived from the fixture generator (scene_box authored on a Y-up cm

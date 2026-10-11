@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // Composition: direction table, per-quantity weights (physical and ladybug modes), chunked GPU loop, series, dumps.
 #include "internal.h"
 

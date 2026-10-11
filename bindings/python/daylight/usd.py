@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 """USD stage -> list of (name, points [N,3] float64 world metres Z-up, counts int32 [F], indices int32 [sum(counts)])
 with right-handed winding (the `.dmesh` arrays).
 

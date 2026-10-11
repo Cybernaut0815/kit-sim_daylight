@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // read_usd checks against box.usda: hand-computed world Z-up metres, winding flips, pruning. Run: check_usd <dir>.
 #include "daylight_usd.h"
 #include <cmath>
