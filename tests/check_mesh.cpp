@@ -197,6 +197,18 @@ int check_mesh(const char* testsDir) {
     write("DLM1", 2, false); err.clear(); CHECK(!read_dmesh(tmp, ms, err) && !err.empty());
     write("DLM1", 5, true); err.clear(); CHECK(!read_dmesh(tmp, ms, err) && !err.empty());
     std::remove(tmp.c_str());
+    // memory overload: the same image from a buffer, name given by the caller, label in errors
+    std::string buf;
+    {
+      const uint32_t reserved = 0; const uint64_t counts[3] = {5, 2, 7};
+      I[6] = 2;
+      buf.append("DLM1", 4); buf.append(reinterpret_cast<const char*>(&reserved), 4); buf.append(reinterpret_cast<const char*>(counts), 24);
+      buf.append(reinterpret_cast<const char*>(P), 120); buf.append(reinterpret_cast<const char*>(C), 8); buf.append(reinterpret_cast<const char*>(I), 28);
+    }
+    ms.clear();
+    CHECK(read_dmesh(buf.data(), buf.size(), "upload", ms, err) && ms.size() == 1 && ms[0].name == "upload" && ms[0].indices.size() == 7 && ms[0].points == std::vector<double>(P, P + 15));
+    err.clear(); CHECK(!read_dmesh(buf.data(), 32, "upload", ms, err) && err.find("upload") != std::string::npos);
+    buf[3] = '9'; err.clear(); CHECK(!read_dmesh(buf.data(), buf.size(), "upload", ms, err) && !err.empty());
   }
   if (failures) std::printf("check_mesh: %d failure(s)\n", failures);
   return failures;

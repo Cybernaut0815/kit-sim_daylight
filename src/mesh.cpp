@@ -227,34 +227,48 @@ bool read_obj(const std::string& path, std::vector<Mesh>& out, std::string& err)
   return true;
 }
 
-bool read_dmesh(const std::string& path, std::vector<Mesh>& out, std::string& err) {
+namespace {
+
+// One .dmesh image in memory -> Mesh named `name`; `label` names the source in error messages (the path for files).
+bool parse_dmesh(const char* data, size_t size, const std::string& name, const std::string& label, std::vector<Mesh>& out, std::string& err) {
   struct Header { char magic[4]; uint32_t reserved; uint64_t nPoints, nFaces, nIndices; };
   static_assert(sizeof(Header) == 32 && sizeof(int) == 4, "dmesh layout");
+  Header h{};
+  if (size < sizeof h) { err = label + ": truncated"; return false; }
+  std::memcpy(&h, data, sizeof h);
+  if (std::memcmp(h.magic, "DLM1", 4)) { err = label + ": not a .dmesh file (magic DLM1)"; return false; }
+  if (!(h.nPoints <= size / 24 && h.nFaces <= size / 4 && h.nIndices <= size / 4 &&   // no overflow in the sum below
+        32 + 24 * h.nPoints + 4 * h.nFaces + 4 * h.nIndices <= size)) { err = label + ": truncated"; return false; }
+  Mesh m; m.name = name;
+  m.points.resize(3 * h.nPoints); m.counts.resize(h.nFaces); m.indices.resize(h.nIndices);
+  const char* p = data + sizeof h;
+  std::memcpy(m.points.data(), p, 24 * h.nPoints); p += 24 * h.nPoints;
+  std::memcpy(m.counts.data(), p, 4 * h.nFaces); p += 4 * h.nFaces;
+  std::memcpy(m.indices.data(), p, 4 * h.nIndices);
+  uint64_t sum = 0;
+  for (int c : m.counts) { if (c < 3) { err = label + ": face with fewer than 3 vertices"; return false; } sum += (uint64_t)c; }
+  if (sum != h.nIndices) { err = label + ": sum(counts) != n_indices"; return false; }
+  for (int i : m.indices) if (i < 0 || (uint64_t)i >= h.nPoints) { err = label + ": vertex index out of range"; return false; }
+  if (h.nFaces) out.push_back(std::move(m));   // empty meshes dropped like empty OBJ groups
+  return true;
+}
+
+}  // namespace
+
+bool read_dmesh(const char* data, size_t size, const std::string& name, std::vector<Mesh>& out, std::string& err) {
+  return parse_dmesh(data, size, name, name, out, err);
+}
+
+bool read_dmesh(const std::string& path, std::vector<Mesh>& out, std::string& err) {
   std::FILE* f = std::fopen(path.c_str(), "rb");
   if (!f) { err = "cannot open " + path; return false; }
   std::fseek(f, 0, SEEK_END);
-  const uint64_t size = (uint64_t)_ftelli64(f);
+  std::vector<char> buf(static_cast<size_t>(_ftelli64(f)));
   std::rewind(f);
-  Header h{};
-  Mesh m; m.name = stem(path);
-  bool ok = std::fread(&h, sizeof h, 1, f) == 1;
-  if (ok && std::memcmp(h.magic, "DLM1", 4)) { std::fclose(f); err = path + ": not a .dmesh file (magic DLM1)"; return false; }
-  ok = ok && h.nPoints <= size / 24 && h.nFaces <= size / 4 && h.nIndices <= size / 4 &&   // no overflow in the sum below
-       32 + 24 * h.nPoints + 4 * h.nFaces + 4 * h.nIndices <= size;
-  if (ok) {
-    m.points.resize(3 * h.nPoints); m.counts.resize(h.nFaces); m.indices.resize(h.nIndices);
-    ok = std::fread(m.points.data(), 8, m.points.size(), f) == m.points.size() &&
-         std::fread(m.counts.data(), 4, m.counts.size(), f) == m.counts.size() &&
-         std::fread(m.indices.data(), 4, m.indices.size(), f) == m.indices.size();
-  }
+  const bool ok = std::fread(buf.data(), 1, buf.size(), f) == buf.size();
   std::fclose(f);
   if (!ok) { err = path + ": truncated"; return false; }
-  uint64_t sum = 0;
-  for (int c : m.counts) { if (c < 3) { err = path + ": face with fewer than 3 vertices"; return false; } sum += (uint64_t)c; }
-  if (sum != h.nIndices) { err = path + ": sum(counts) != n_indices"; return false; }
-  for (int i : m.indices) if (i < 0 || (uint64_t)i >= h.nPoints) { err = path + ": vertex index out of range"; return false; }
-  if (h.nFaces) out.push_back(std::move(m));   // empty meshes dropped like empty OBJ groups
-  return true;
+  return parse_dmesh(buf.data(), buf.size(), stem(path), path, out, err);
 }
 
 }  // namespace daylight

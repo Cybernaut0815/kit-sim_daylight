@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 
 using namespace daylight;
 static int fails = 0;
@@ -128,6 +129,13 @@ int check_solar(const char*) {
   CHECK(!read_epw(tmp + "/daylight_check_does_not_exist.epw", lp, err));
   write_epw(leapPath.c_str(), 8784, "No");   // leap inferred from the row count alone
   CHECK(read_epw(leapPath, lp, err) && lp.leap);
+  {   // stream overload: the same file through an istream; the label replaces the path in errors
+    std::ifstream in(leapPath);
+    Weather ls;
+    CHECK(read_epw(in, "upload", ls, err) && ls.leap && ls.dni == lp.dni && ls.dhi == lp.dhi && ls.tz == 3);
+    std::istringstream bad("not an epw\n");
+    err.clear(); CHECK(!read_epw(bad, "upload.epw", ls, err) && err.find("upload.epw") != std::string::npos);
+  }
 
   // ---- steps: annual
   Options opt;

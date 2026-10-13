@@ -8,6 +8,23 @@ export interface ObjMesh {
   name: string;
   positions: ArrayLike<number>; // xyz interleaved, world metres, Z-up
   indices: ArrayLike<number>; // triangle indices, 0-based
+  id?: string; // stable identity for runRemote(): the server caches the mesh under it, so a re-run sends no bytes
+}
+
+/**
+ * `.dmesh` file stems (= core mesh names) for `names`: sanitised to `[A-Za-z0-9._-]`, empty -> `fallback`, made unique
+ * case-insensitively (`_2`, `_3`, ... suffixes; Windows/macOS file systems ignore case). Shared by run() and runRemote().
+ */
+export function dmeshStems(names: ArrayLike<string>, fallback = 'mesh'): string[] {
+  const used = new Set<string>(), out: string[] = [];
+  for (let k = 0; k < names.length; k++) {
+    const base = names[k].replace(/[^A-Za-z0-9._-]/g, '_') || fallback;
+    let stem = base;
+    for (let i = 2; used.has(stem.toLowerCase()); i++) stem = `${base}_${i}`;
+    used.add(stem.toLowerCase());
+    out.push(stem);
+  }
+  return out;
 }
 
 export function toObj(meshes: ObjMesh[]): string {
@@ -32,7 +49,7 @@ export function toObj(meshes: ObjMesh[]): string {
  * One mesh -> `.dmesh` bytes (little-endian): "DLM1", uint32 0, uint64 nPoints/nFaces/nIndices,
  * float64 xyz[3*nPoints], int32 counts[nFaces] (all 3), int32 indices[nIndices]. Mesh name = file stem.
  */
-export function toDmesh(mesh: ObjMesh): Uint8Array {
+export function toDmesh(mesh: ObjMesh): Uint8Array<ArrayBuffer> {
   const N = mesh.positions.length / 3, F = mesh.indices.length / 3, M = mesh.indices.length;
   if (!Number.isInteger(N) || !Number.isInteger(F)) throw new Error(`${mesh.name}: positions must be xyz triples, indices triangle triples`);
   const buf = new ArrayBuffer(32 + 24 * N + 4 * F + 4 * M);
@@ -178,23 +195,21 @@ export async function run(exe: string, input: { sensors: string | ObjMesh[]; con
   const { execFile } = await import('node:child_process');
   const dir = await fs.mkdtemp(join(tmpdir(), 'daylight-'));
   try {
-    const used = new Set<string>();
-    const write = async (kind: string, m: string | ObjMesh[]) => {
+    const sens = typeof input.sensors === 'string' ? [] : input.sensors;
+    const ctx = !input.context || typeof input.context === 'string' ? [] : input.context;
+    const stems = dmeshStems([...sens.map((m) => m.name || 'sensors'), ...ctx.map((m) => m.name || 'context')]);
+    const write = async (kind: string, m: string | ObjMesh[], first: number) => {
       if (typeof m === 'string') { const p = join(dir, kind + '.obj'); await fs.writeFile(p, m); return [p]; }
       const paths: string[] = [];
-      for (const mesh of m) {
-        const base = mesh.name.replace(/[^A-Za-z0-9._-]/g, '_') || kind;
-        let stem = base;
-        for (let i = 2; used.has(stem.toLowerCase()); i++) stem = `${base}_${i}`; // case-insensitive: Windows/macOS file systems
-        used.add(stem.toLowerCase());
-        paths.push(join(dir, stem + '.dmesh'));
-        await fs.writeFile(paths[paths.length - 1], toDmesh(mesh));
+      for (let k = 0; k < m.length; k++) {
+        paths.push(join(dir, stems[first + k] + '.dmesh'));
+        await fs.writeFile(paths[paths.length - 1], toDmesh(m[k]));
       }
       return paths;
     };
     const out = join(dir, 'out.npy');
-    const args = await write('sensors', input.sensors);
-    if (input.context) for (const p of await write('context', input.context)) args.push('--context', p);
+    const args = await write('sensors', input.sensors, 0);
+    if (input.context) for (const p of await write('context', input.context, sens.length)) args.push('--context', p);
     args.push(...(input.args ?? []), '--out', out);
     await new Promise<void>((res, rej) => execFile(exe, args, { maxBuffer: 1 << 26 }, (e, _o, stderr) => (e ? rej(new Error(`${exe} failed: ${stderr.trim() || e.message}`)) : res())));
     const manifest = JSON.parse(await fs.readFile(out + '.json', 'utf8')) as { columns: string[] };
@@ -202,4 +217,59 @@ export async function run(exe: string, input: { sensors: string | ObjMesh[]; con
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+}
+
+/** The core's `FILE.json` manifest as `daylight_server` returns it (plus the server's own fields). */
+export interface RemoteManifest {
+  columns: string[];
+  duration_h: number;
+  dirs: { sky: number; ground: number; sun: number };
+  meshes: { name: string; first: number; count: number }[];
+  run_s?: number;
+  cache?: Record<string, string>;
+}
+
+/**
+ * Browser or Node: runs the core on a `daylight_server`. Meshes travel by id (`ObjMesh.id`; a UUID is minted here
+ * when absent): `POST <url>/run` names them, and when the server answers 404 `{missing}` the `.dmesh` bytes go up
+ * once via `PUT <url>/mesh/<id>?name=<stem>` before one retry, so a re-run with other settings sends no geometry.
+ * `epw` is a Blob (uploaded) or `{ url }` (the server fetches it through its allowlisted proxy cache). `args` are
+ * CLI flags verbatim (no files). Rejects with the server's text on 4xx / 5xx. One Float64Array per element.
+ */
+export async function runRemote(
+  url: string,
+  input: { sensors: ObjMesh[]; context?: ObjMesh[]; epw?: Blob | { url: string }; args?: string[]; fetch?: typeof globalThis.fetch },
+): Promise<{ values: Float64Array[]; columns: string[]; manifest: RemoteManifest; cache?: Record<string, string> }> {
+  const f = input.fetch ?? globalThis.fetch;
+  const base = url.replace(/\/$/, '');
+  const meshes = [...input.sensors, ...(input.context ?? [])];
+  for (const m of meshes) m.id ??= crypto.randomUUID();
+  const stems = dmeshStems(meshes.map((m) => m.name));
+  const body = () => {
+    const fd = new FormData();
+    for (const m of input.sensors) fd.append('sensors', m.id!);
+    for (const m of input.context ?? []) fd.append('context', m.id!);
+    if (input.epw instanceof Blob) fd.append('epw', input.epw, 'weather.epw');
+    else if (input.epw) fd.append('epw_url', input.epw.url);
+    for (const a of input.args ?? []) fd.append('args', a);
+    return fd;
+  };
+  let res = await f(`${base}/run`, { method: 'POST', body: body() });
+  if (res.status === 404) {
+    const { missing } = (await res.json()) as { missing: string[] };
+    await Promise.all(missing.map(async (id) => {
+      const k = meshes.findIndex((m) => m.id === id);
+      if (k < 0) throw new Error(`${base}/run asked for an unknown mesh id ${id}`);
+      const put = await f(`${base}/mesh/${encodeURIComponent(id)}?name=${encodeURIComponent(stems[k])}`, { method: 'PUT', body: toDmesh(meshes[k]) });
+      if (!put.ok) throw new Error(`PUT ${base}/mesh/${id} failed (${put.status}): ${(await put.text()).trim()}`);
+    }));
+    res = await f(`${base}/run`, { method: 'POST', body: body() });
+  }
+  if (!res.ok) throw new Error(`${base}/run failed (${res.status}): ${(await res.text()).trim()}`);
+  const m = (await res.json()) as RemoteManifest & { values_b64: string };
+  const bin = atob(m.values_b64), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const data = new Float64Array(bytes.buffer), cols = m.columns.length, values: Float64Array[] = [];
+  for (let i = 0; cols && i + cols <= data.length; i += cols) values.push(data.subarray(i, i + cols));
+  return { values, columns: m.columns, manifest: m, cache: m.cache };
 }

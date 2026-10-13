@@ -3,8 +3,10 @@
 // against CPU loops over the downloaded bits, adaptive sub-launches. Self-skips without a CUDA device.
 #include "internal.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 using namespace daylight;
@@ -32,7 +34,7 @@ static bool hits_box(float3 o, float3 d, double lo, double hi) {
   return t0 <= t1;
 }
 
-int check_gpu(const char*) {
+int check_gpu(const char* testsDir) {
   std::string err;
   Gpu* g = gpu_init(err);
   if (!g) { std::printf("skip: no CUDA device (%s)\n", err.c_str()); return 0; }
@@ -193,5 +195,33 @@ int check_gpu(const char*) {
 
   if (!err.empty()) std::printf("gpu: last error: %s\n", err.c_str());
   gpu_destroy(g);
+
+  // run() keeps its GPU context for the process and, with Options::sceneKey, the resident GAS: same numbers, no rebuild
+  {
+    std::vector<Mesh> meshes;
+    std::string e2;
+    CHECK(read_obj(std::string(testsDir) + "/box.obj", meshes, e2));
+    Options o;
+    o.quantities = {Quantity::SunHours};
+    o.lat = 42.35; o.lon = -71.07; o.tz = -5;
+    CHECK(parse_hoy("06-21T12:00", false, o.t0, e2));
+    auto ms = [](std::chrono::steady_clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    Result r1, r2, r3;
+    o.sceneKey = "box";
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(run(meshes, nullptr, o, r1, e2));
+    const auto t1 = std::chrono::steady_clock::now();
+    CHECK(run(meshes, nullptr, o, r2, e2));   // same key: scene reused
+    const auto t2 = std::chrono::steady_clock::now();
+    o.sceneKey = "box-2";
+    CHECK(run(meshes, nullptr, o, r3, e2));   // new key: rebuilt, identical values
+    size_t faces = 0;
+    for (const Mesh& m : meshes) faces += m.numFaces();
+    CHECK(r1.values.size() == faces && faces > 0);
+    CHECK(r1.values == r2.values);
+    CHECK(r1.values == r3.values);
+    if (!e2.empty()) std::printf("run: %s\n", e2.c_str());
+    std::printf("run: first %.0f ms (context + GAS), reused scene %.0f ms\n", ms(t1 - t0), ms(t2 - t1));
+  }
   return failures;
 }

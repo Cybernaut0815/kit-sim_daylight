@@ -37,7 +37,7 @@ add_custom_command(OUTPUT "${GEN}/trace_optixir.h"
 
 set(CXX_WARN /W4 /WX /permissive- /fp:precise /utf-8 /EHsc)
 
-add_library(daylightcore STATIC src/mesh.cpp src/sky.cpp src/solar.cpp src/run.cpp src/gpu.cu "${GEN}/trace_optixir.h")
+add_library(daylightcore STATIC src/mesh.cpp src/sky.cpp src/solar.cpp src/run.cpp src/cli.cpp src/gpu.cu "${GEN}/trace_optixir.h")
 target_include_directories(daylightcore PUBLIC src PRIVATE "${OPTIX_INCLUDE}" "${earcut_SOURCE_DIR}/include" "${GEN}")
 target_link_libraries(daylightcore PUBLIC CUDA::cudart_static)
 target_compile_definitions(daylightcore PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)

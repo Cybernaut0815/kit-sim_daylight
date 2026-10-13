@@ -21,6 +21,20 @@ constexpr double kNight = 1e-4;                                               //
 inline double bright(const float* rgb) { return kRf * rgb[0] + kGf * rgb[1] + kBf * rgb[2]; }
 inline float3 neg(float3 v) { return float3{-v.x, -v.y, -v.z}; }
 
+// Process-lifetime GPU state. Created on first use and never destroyed: CUDA / OptiX teardown from a static
+// destructor runs after the runtime has unloaded and can crash at exit, and the OS reclaims the device anyway.
+// gpu_build / upload / grow free or reuse their previous buffers, so one Gpu serves every run of the process.
+// `key` is the Options::sceneKey whose occluder triangles / GAS are resident (empty = none). Not thread-safe:
+// run() is one-at-a-time, as the CLI and the server (one GPU, a mutex) use it.
+struct Resident {
+  Gpu* gpu = nullptr;
+  std::string key;
+  double c[3] = {0, 0, 0};   // bbox centre the resident triangles were recentred by
+  size_t nTris = 0;
+  int skipped = 0;
+};
+Resident& resident() { static Resident r; return r; }
+
 }  // namespace
 
 // NumPy .npy v1.0 header (little-endian, C order). descr "<f4", "<f8" or "<u4". Data rows follow.
@@ -72,12 +86,17 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   out.durationHours = durationHours;
 
   // ---- geometry ------------------------------------------------------------------------------------------------
+  Resident& R = resident();
+  const bool reuse = !opt.sceneKey.empty() && opt.sceneKey == R.key && R.gpu;   // same meshes + selfOcclude as last run
   double c[3];
-  bbox_centre(meshes, c);
   Tris tris;
   int skipped = 0;
-  for (const Mesh& m : meshes)
-    if (!m.sensor || opt.selfOcclude) triangulate(m, c, tris, skipped);
+  if (reuse) { std::copy(R.c, R.c + 3, c); skipped = R.skipped; }
+  else {
+    bbox_centre(meshes, c);
+    for (const Mesh& m : meshes)
+      if (!m.sensor || opt.selfOcclude) triangulate(m, c, tris, skipped);
+  }
   Sensors sens;
   std::string warn;
   out.ranges.clear();
@@ -93,7 +112,8 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   const size_t nSens = sens.p.size();
   if (nSens == 0) { err = "no sensor elements (no sensor meshes, or all faces degenerate)"; return false; }
   if (opt.verbose) {
-    std::fprintf(stderr, "info: %zu sensors, %zu triangles, %zu steps (%.1f h)\n", nSens, tris.i.size(), T, durationHours);
+    std::fprintf(stderr, "info: %zu sensors, %zu triangles%s, %zu steps (%.1f h)\n", nSens, reuse ? R.nTris : tris.i.size(),
+                 reuse ? " (scene reused)" : "", T, durationHours);
     if (skipped) std::fprintf(stderr, "warn: %d degenerate faces skipped in occluders\n", skipped);
     if (!warn.empty()) std::fprintf(stderr, "warn: %s\n", warn.c_str());
   }
@@ -291,10 +311,14 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
     if (!bf || !npy_write_header(bf.get(), nSens, nWords, "<u4")) { err = "cannot write " + opt.dumpBitsPath; return false; }
   }
   if (nDir > 0) {
-    Gpu* g = gpu_init(err);
-    if (!g) return false;
-    std::unique_ptr<Gpu, void (*)(Gpu*)> guard(g, gpu_destroy);
-    if (!gpu_build(*g, tris, err) || !gpu_set_scene(*g, sens, D, err)) return false;
+    if (!R.gpu && !(R.gpu = gpu_init(err))) return false;
+    Gpu* g = R.gpu;
+    if (!reuse) {
+      R.key.clear();   // a failed build leaves nothing resident
+      if (!gpu_build(*g, tris, err)) return false;
+      R.key = opt.sceneKey; std::copy(c, c + 3, R.c); R.nTris = tris.i.size(); R.skipped = skipped;
+    }
+    if (!gpu_set_scene(*g, sens, D, err)) return false;
     // ponytail: 256 MB cap on both the bits buffer and the series tile; make it a device-memory fraction if it ever thrashes
     const size_t ncMax = std::max<size_t>(1, (size_t(256) << 20) / (4 * std::max<size_t>(1, std::max(nWords, series ? size_t(Tup) : size_t(0)))));
     const unsigned flags = gpu_ray_flags(opt.cullBackfaces);

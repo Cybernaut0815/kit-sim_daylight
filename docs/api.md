@@ -21,6 +21,13 @@ double roofRadiation = r.values[0], roofSunHours = r.values[1];
 // no weather file: daylight::clear_sky_weather(52.52, 13.41, 1, 3.0, 0.0, w, err) instead of read_epw (lat, lon, tz, TL, altitude)
 ```
 
+Inputs from memory (uploads, no files): `read_dmesh(data, size, name, meshes, err)` parses one `.dmesh` image,
+`read_epw(istream, label, w, err)` parses EPW text. A long-lived process (a server) sets `Options::sceneKey` to an
+identity of its meshes + `selfOcclude`: when the key equals the previous run's, the occluder triangles and the OptiX
+acceleration structure stay resident and only sensors, directions and the trace are redone; the GPU context is kept
+for the whole process either way. `src/cli.h` (`daylight::cli::parse` / `prepare` / `manifest_json`) exposes the CLI's
+flag parsing, weather / time rules and manifest for front ends that accept CLI flags verbatim.
+
 **C++ with USD.** `bindings/cpp` adds `read_usd` (LightUSD: sublayers, references, payloads, xforms, up axis,
 units); configure with `-DDAYLIGHT_USD=ON` (preset `vs2022-usd`), link `daylight_usd`.
 
@@ -68,7 +75,7 @@ const context = await fromGLB(await fs.readFile('city.glb'));
 const { values, columns, manifest } = await run('build/RelWithDebInfo/daylight.exe', { sensors, context, args: ['--epw', 'site.epw'] });
 console.log(columns, values[0]);                                     // one Float64Array per sensor triangle
 await applyToThree(roofMesh, values.slice(0, roofTriangles).map((v) => v[0]));   // vertex colours (viridis) on the mesh
-const bytes = toDmesh(sensors[0]);                                   // browser: POST to a server that runs the CLI
+const remote = await runRemote('http://gpu-box:8080', { sensors, context, epw: epwFile, args: ['--quantity', 'radiation'] }); // browser: daylight_server, meshes cached by id
 ```
 
 ## Bindings overview

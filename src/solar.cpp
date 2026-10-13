@@ -69,6 +69,10 @@ Sun sun_noaa(double lat, double lon, double tz, int month, int day, double hourF
 bool read_epw(const std::string& path, Weather& w, std::string& err) {
   std::ifstream f(path);
   if (!f) { err = "cannot open EPW " + path; return false; }
+  return read_epw(f, path, w, err);
+}
+
+bool read_epw(std::istream& f, const std::string& path, Weather& w, std::string& err) {
   std::string line;
   std::vector<std::string> cols;
   auto split = [&](const std::string& l) {

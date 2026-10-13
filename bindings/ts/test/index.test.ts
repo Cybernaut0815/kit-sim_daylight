@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { Document, NodeIO } from '@gltf-transform/core';
 import { BoxGeometry, Mesh } from 'three';
 import { describe, expect, it } from 'vitest';
-import { applyToThree, colormap, fromGLB, fromThree, parseNpy, parseValues, run, toDmesh, toObj } from '../src/index.js';
+import { applyToThree, colormap, dmeshStems, fromGLB, fromThree, parseNpy, parseValues, run, runRemote, toDmesh, toObj } from '../src/index.js';
 
 const box = (x = 1) => { const m = new Mesh(new BoxGeometry(1, 1, 1)); m.position.set(0, 2, 0); m.scale.x = x; m.name = 'box'; return m; };
 
@@ -118,6 +118,61 @@ describe('applyToThree', () => {
     expect(m.material).toBe(mat);
     await expect(applyToThree(new Mesh(new BoxGeometry()), vals(7))).rejects.toThrow(/triangle count/);
   });
+});
+
+it('dmeshStems', () => {
+  expect(dmeshStems(['a b', 'a_b', 'A_B', '', 'x/y'])).toEqual(['a_b', 'a_b_2', 'A_B_3', 'mesh', 'x_y']); // case kept, uniqueness case-insensitive
+  expect(dmeshStems([''], 'sensors')).toEqual(['sensors']);
+});
+
+describe('runRemote', () => {
+  const manifest = { columns: ['sunhours_front', 'radiation_front'], duration_h: 1, dirs: { sky: 145, ground: 145, sun: 1 }, meshes: [{ name: 'box', first: 0, count: 2 }], run_s: 0.1, cache: { response: 'miss' } };
+  it('names meshes by id, uploads the missing ones once, decodes values_b64', async () => {
+    const m = fromThree([box()])[0];
+    m.id = 'id-1';
+    const calls: { url: string; method?: string; body?: unknown }[] = [];
+    let posts = 0;
+    const fetchMock = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method, body: init?.body });
+      if (init?.method === 'PUT') return new Response(null, { status: 204 });
+      if (++posts === 1) return new Response(JSON.stringify({ missing: ['id-1'] }), { status: 404 });
+      const values_b64 = Buffer.from(new Float64Array([1, 2.5, 3, 4]).buffer).toString('base64');
+      return new Response(JSON.stringify({ ...manifest, values_b64 }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const r = await runRemote('http://h/', { sensors: [m], args: ['--quantity', 'sunhours'], fetch: fetchMock });
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(['POST http://h/run', 'PUT http://h/mesh/id-1?name=box', 'POST http://h/run']);
+    expect(String.fromCharCode(...(calls[1].body as Uint8Array).subarray(0, 4))).toBe('DLM1');
+    const fd = calls[2].body as FormData;
+    expect(fd.getAll('sensors')).toEqual(['id-1']);
+    expect(fd.getAll('args')).toEqual(['--quantity', 'sunhours']);
+    expect(fd.has('epw')).toBe(false);
+    expect(r.columns).toEqual(manifest.columns);
+    expect(r.values.map((v) => Array.from(v))).toEqual([[1, 2.5], [3, 4]]);
+    expect(r.manifest.meshes[0].count).toBe(2);
+    expect(r.cache).toEqual({ response: 'miss' });
+  });
+  it('mints ids, sends epw_url or an epw blob, rejects with the server text', async () => {
+    const seen: FormData[] = [];
+    const fetchMock = (async (_url: string, init?: RequestInit) => { seen.push(init!.body as FormData); return new Response('error: unknown flag --x\n', { status: 400 }); }) as unknown as typeof fetch;
+    const sensors = fromThree([box()]);
+    await expect(runRemote('http://h', { sensors, epw: { url: 'https://x/y.epw' }, args: ['--x'], fetch: fetchMock })).rejects.toThrow(/\(400\): error: unknown flag --x/);
+    expect(sensors[0].id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(seen[0].get('epw_url')).toBe('https://x/y.epw');
+    await expect(runRemote('http://h', { sensors, epw: new Blob(['LOCATION,x']), fetch: fetchMock })).rejects.toThrow(/400/);
+    expect(seen[1].get('epw')).toBeInstanceOf(Blob);
+  });
+});
+
+const liveUrl = process.env.DAYLIGHT_URL ?? '';
+it.skipIf(!liveUrl)('runRemote() against a live daylight_server (set DAYLIGHT_URL to enable)', async () => {
+  const sensors = fromThree([box()]);
+  const args = ['--lat', '42.35', '--lon', '-71.07', '--tz', '-5', '--quantity', 'sunhours', '--time', '06-21T12:00'];
+  const r = await runRemote(liveUrl, { sensors, args });
+  expect(r.values.length).toBe(12);
+  expect(r.columns).toEqual(['sunhours_front']);
+  for (const row of r.values) for (const v of row) expect(v).toBeGreaterThanOrEqual(0), expect(v).toBeLessThanOrEqual(1);
+  const again = await runRemote(liveUrl, { sensors, args }); // same ids and args: the server answers from its response cache
+  expect(again.cache?.response).toBe('hit');
 });
 
 const exe = process.env.DAYLIGHT_EXE && existsSync(process.env.DAYLIGHT_EXE) ? process.env.DAYLIGHT_EXE : '';

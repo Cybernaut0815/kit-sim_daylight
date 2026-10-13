@@ -23,15 +23,14 @@ const context = await fromGLB(await fs.readFile('city.glb'));
 const { values } = await run('daylight.exe', { sensors, context, args: ['--epw', 'x.epw', '--quantity', 'radiation'] });
 ```
 
-Browser (no Node builtins; the CLI runs on a GPU server):
+Browser (or Node) against a `daylight_server` (the GPU box runs the core in-process; meshes are uploaded once and
+referenced by `id` afterwards, so a re-run with other flags sends no geometry):
 
 ```ts
-import { fromThree, toDmesh, toObj } from 'daylight-mesh';
+import { fromThree, runRemote } from 'daylight-mesh';
 
-const meshes = fromThree([scene]);
-const body = new FormData();
-for (const m of meshes) body.append('sensors', new Blob([toDmesh(m)]), `${m.name}.dmesh`); // or one toObj(meshes) as sensors.obj
-await fetch('/run?epw=x.epw', { method: 'POST', body });   // server: daylight.exe *.dmesh --epw x.epw --out out.txt
+const sensors = fromThree([scene]);                                   // give each ObjMesh a stable `id` to reuse the server cache
+const { values, columns, cache } = await runRemote('http://gpu-box:8080', { sensors, epw: epwFile, args: ['--quantity', 'radiation,sunhours'] });
 ```
 
 Colour a three.js mesh by its results (`applyToThree`):
@@ -66,10 +65,16 @@ await applyToThree(mesh, values.slice(first, first + count).map((r) => r[col]));
   `sensors`/`context` accept `ObjMesh[]` (written as one `<name>.dmesh` per mesh, name sanitised to `[A-Za-z0-9._-]`
   and made unique; the manifest's mesh names are the file stems) or OBJ text (written as one `.obj`).
   Needs Node >= 20 and the GPU build of the core.
+- `runRemote(url, { sensors, context?, epw?, args? })`: `POST url/run` with the meshes' `id`s (minted as UUIDs when
+  absent), `PUT url/mesh/<id>?name=<stem>` once for every id the server reports missing, then one retry; `epw` is a
+  `Blob` (uploaded) or `{ url }` (fetched by the server through its allowlisted proxy cache); returns
+  `{ values, columns, manifest, cache }` from the server's JSON (`values_b64` decoded). Browser-safe.
+- `dmeshStems(names, fallback?)`: the stem / mesh-name sanitiser both runners use (`[^A-Za-z0-9._-]` -> `_`, unique
+  case-insensitively).
 - `parseNpy(bytes, cols)`: parses a core `--out FILE.npy` (NumPy v1.0 `<f8`, C order) into rows of `cols`.
 - `parseValues(text)`: parses a core `--out FILE` text file.
 
-Browser bundles use `toDmesh`, `toObj`, `fromThree`, `fromGLB`, `colormap`, `applyToThree`; `run` imports Node builtins lazily and must stay on Node.
+Browser bundles use `toDmesh`, `toObj`, `fromThree`, `fromGLB`, `colormap`, `applyToThree`, `runRemote`; `run` imports Node builtins lazily and must stay on Node.
 
 ## Performance (2M triangles, RTX 2060)
 

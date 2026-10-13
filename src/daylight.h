@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,6 +57,10 @@ struct Options {
   int stepMin = 60;                   // step for ranges, minutes
   std::string seriesPath;             // .npy time series sink (+ .hoys.txt); empty = off
   std::string dumpBitsPath, dumpSky, dumpSun;   // validation dumps; empty = off (GPU selection: CUDA_VISIBLE_DEVICES)
+  // Scene identity for long-lived callers (a server). Non-empty and equal to the previous run's key: the occluder
+  // triangles and the acceleration structure of that run stay resident and are reused (the caller guarantees the
+  // meshes and selfOcclude are unchanged). Empty (the CLI): rebuilt every run. The GPU context is kept either way.
+  std::string sceneKey;
   bool verbose = false;
 };
 
@@ -73,7 +78,10 @@ bool read_obj(const std::string& path, std::vector<Mesh>& out, std::string& err)
 //   char[4] "DLM1" | uint32 0 | uint64 n_points | uint64 n_faces | uint64 n_indices |
 //   float64 xyz[3*n_points] (metres, Z-up) | int32 counts[n_faces] (>= 3, right-handed) | int32 indices[n_indices] (0-based)
 bool read_dmesh(const std::string& path, std::vector<Mesh>& out, std::string& err);
+// The same from memory (an upload); name is the mesh name (what the file stem is for the path overload).
+bool read_dmesh(const char* data, size_t size, const std::string& name, std::vector<Mesh>& out, std::string& err);
 bool read_epw(const std::string& path, Weather& out, std::string& err);
+bool read_epw(std::istream& in, const std::string& label, Weather& out, std::string& err);   // label names the source in errors
 // Synthetic 8760-row weather from the Ineichen-Perez clear-sky model (Linke turbidity, site altitude in metres):
 // every hour cloudless, so radiation results are an upper bound, not a climate estimate. Sun at each hour midpoint
 // (NOAA position); turbidity >= 1 (3 = clean temperate air, 5-7 = urban/humid).
