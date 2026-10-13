@@ -46,13 +46,14 @@ await applyToThree(mesh, values.slice(first, first + count).map((r) => r[col]));
 
 ## API
 
-- `colormap(values, { vmin, vmax })`: viridis (9 stops, linear) -> `Float32Array` RGB triples; range defaults to the
-  finite min/max of `values` (`vmax == vmin` -> first stop); non-finite values -> grey `[0.5, 0.5, 0.5]`.
-  Identical to `daylight.colormap` in the Python binding.
-- `applyToThree(mesh, values, { vmin, vmax, material })`: `values.length` must be the triangle count (per-face: the
+- `colormap(values, { vmin, vmax, stops })`: viridis (9 stops, linear) -> `Float32Array` RGB triples; range defaults to the
+  finite min/max of `values` (`vmax == vmin` -> first stop); non-finite values -> grey `[0.5, 0.5, 0.5]`; `stops` =
+  any evenly spaced RGB list for another gradient. Default identical to `daylight.colormap` in the Python binding.
+- `applyToThree(mesh, values, { vmin, vmax, stops, rgb, material })`: `values.length` must be the triangle count (per-face: the
   geometry is converted to non-indexed via `toNonIndexed()` so each face gets one flat colour) or the vertex count
-  (per-vertex, geometry unchanged). Sets the `color` attribute and, unless `material: false`,
-  `mesh.material = new MeshStandardMaterial({ vertexColors: true })`. Imports `three` lazily; returns the RGB array.
+  (per-vertex, geometry unchanged). Colours from `colormap()` or from `rgb` (3 floats per value). Sets the `color`
+  attribute and, unless `material: false`, `mesh.material = new MeshStandardMaterial({ vertexColors: true })`.
+  Imports `three` lazily; returns the RGB array.
 - `ObjMesh { name, positions /* xyz, metres, Z-up */, indices /* 0-based triangles */ }`.
 - `fromThree(objects, { scale })`: `updateMatrixWorld(true)`, applies `matrixWorld`, converts `(x, y, z) -> (x, -z, y)`,
   reverses winding when `det(matrixWorld) < 0`. Triangle `BufferGeometry` only (indexed or not); no strips, fans or lines.

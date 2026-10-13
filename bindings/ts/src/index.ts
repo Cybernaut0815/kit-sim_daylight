@@ -144,8 +144,13 @@ export function parseNpy(bytes: Uint8Array, cols: number): Float64Array[] {
 // viridis at t = 0, 0.125, ..., 1 (matplotlib); shared with bindings/python.
 const VIRIDIS = [[0.267004, 0.004874, 0.329415], [0.278826, 0.175490, 0.483397], [0.229739, 0.322361, 0.545706], [0.172719, 0.448791, 0.557885], [0.127568, 0.566949, 0.550556], [0.157851, 0.683765, 0.501686], [0.369214, 0.788888, 0.382914], [0.678489, 0.863742, 0.189503], [0.993248, 0.906157, 0.143936]];
 
-/** Values -> RGB triples (Float32Array, 3 per value), viridis over [vmin, vmax] (default: finite min/max); non-finite -> grey. */
-export function colormap(values: ArrayLike<number>, opts: { vmin?: number; vmax?: number } = {}): Float32Array {
+/**
+ * Values -> RGB triples (Float32Array, 3 per value) over [vmin, vmax] (default: finite min/max); non-finite -> grey.
+ * `stops`: evenly spaced RGB stops (0..1) of any other gradient, default viridis.
+ */
+export function colormap(values: ArrayLike<number>, opts: { vmin?: number; vmax?: number; stops?: ArrayLike<ArrayLike<number>> } = {}): Float32Array {
+  const stops = opts.stops ?? VIRIDIS, n = stops.length - 1;
+  if (n < 1) throw new RangeError('stops needs at least two colours');
   let lo = Infinity, hi = -Infinity;
   for (let i = 0; i < values.length; i++) { const v = values[i]; if (Number.isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; } }
   const vmin = opts.vmin ?? lo, span = (opts.vmax ?? hi) - vmin;
@@ -154,7 +159,7 @@ export function colormap(values: ArrayLike<number>, opts: { vmin?: number; vmax?
     const v = values[i];
     if (!Number.isFinite(v)) { rgb.fill(0.5, 3 * i, 3 * i + 3); continue; }
     const t = span ? Math.min(Math.max((v - vmin) / span, 0), 1) : 0;
-    const k = Math.min(Math.floor(t * 8), 7), f = t * 8 - k, a = VIRIDIS[k], b = VIRIDIS[k + 1];
+    const k = Math.min(Math.floor(t * n), n - 1), f = t * n - k, a = stops[k], b = stops[k + 1];
     for (let c = 0; c < 3; c++) rgb[3 * i + c] = a[c] + f * (b[c] - a[c]);
   }
   return rgb;
@@ -163,15 +168,17 @@ export function colormap(values: ArrayLike<number>, opts: { vmin?: number; vmax?
 /**
  * Colours `mesh` by `values`: one per triangle (geometry becomes non-indexed so each face gets a flat colour) or one per
  * vertex. Sets the `color` attribute and, unless `material: false`, a `MeshStandardMaterial({ vertexColors: true })`.
+ * Colours come from colormap() (`vmin`, `vmax`, `stops`) or, with `rgb` (3 floats per value), from the caller.
  * Imports three lazily (peer dependency). Returns the RGB attribute array.
  */
-export async function applyToThree(mesh: Mesh, values: ArrayLike<number>, opts: { vmin?: number; vmax?: number; material?: boolean } = {}): Promise<Float32Array> {
+export async function applyToThree(mesh: Mesh, values: ArrayLike<number>, opts: { vmin?: number; vmax?: number; stops?: ArrayLike<ArrayLike<number>>; rgb?: Float32Array; material?: boolean } = {}): Promise<Float32Array> {
   const { BufferAttribute, MeshStandardMaterial } = await import('three');
   let geometry = mesh.geometry;
   const triangles = (geometry.index ? geometry.index.count : geometry.attributes.position.count) / 3;
   const perFace = values.length === triangles;
   if (!perFace && values.length !== geometry.attributes.position.count) throw new Error('values.length must be the triangle count (N) or the vertex count (M)');
-  let rgb = colormap(values, opts);
+  if (opts.rgb && opts.rgb.length !== 3 * values.length) throw new Error('rgb must hold 3 floats per value');
+  let rgb = opts.rgb ?? colormap(values, opts);
   if (perFace) {
     if (geometry.index) geometry = mesh.geometry = geometry.toNonIndexed();
     const face = rgb;

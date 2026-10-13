@@ -97,6 +97,10 @@ it('colormap', () => {
   near(rgb, 3, [0.5, 0.5, 0.5]);
   near(colormap([10, 20, NaN]), 1, [0.993248, 0.906157, 0.143936]); // default range = finite min/max
   near(colormap([7, 7]), 1, [0.267004, 0.004874, 0.329415]); // vmin == vmax -> t = 0
+  const two = colormap([0, 0.5, 1], { stops: [[0, 0, 0], [1, 1, 1]] }); // any evenly spaced gradient
+  near(two, 1, [0.5, 0.5, 0.5]);
+  near(two, 2, [1, 1, 1]);
+  expect(() => colormap([1], { stops: [[0, 0, 0]] })).toThrow(/two colours/);
 });
 
 describe('applyToThree', () => {
@@ -117,6 +121,13 @@ describe('applyToThree', () => {
     expect(m.geometry.getAttribute('color').count).toBe(24);
     expect(m.material).toBe(mat);
     await expect(applyToThree(new Mesh(new BoxGeometry()), vals(7))).rejects.toThrow(/triangle count/);
+  });
+  it('rgb override: the caller’s colours land on the faces as given', async () => {
+    const m = new Mesh(new BoxGeometry());
+    const rgb = new Float32Array(36).map((_, i) => (i % 3 === 0 ? 1 : 0)); // every face red
+    const out = await applyToThree(m, vals(12), { rgb });
+    expect(Array.from(out.subarray(0, 6))).toEqual([1, 0, 0, 1, 0, 0]);
+    await expect(applyToThree(new Mesh(new BoxGeometry()), vals(12), { rgb: new Float32Array(9) })).rejects.toThrow(/3 floats/);
   });
 });
 
