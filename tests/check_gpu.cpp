@@ -3,6 +3,7 @@
 // against CPU loops over the downloaded bits, adaptive sub-launches. Self-skips without a CUDA device.
 #include "internal.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -222,6 +223,24 @@ int check_gpu(const char* testsDir) {
     CHECK(r1.values == r3.values);
     if (!e2.empty()) std::printf("run: %s\n", e2.c_str());
     std::printf("run: first %.0f ms (context + GAS), reused scene %.0f ms\n", ms(t1 - t0), ms(t2 - t1));
+
+    // several resident scenes: A, B, A again reuses A's parked GAS with identical values; one slot only keeps the last
+    o.residentScenes = 2;
+    Result ra, rb, ra2;
+    o.sceneKey = "scene-A"; CHECK(run(meshes, nullptr, o, ra, e2));
+    o.sceneKey = "scene-B"; CHECK(run(meshes, nullptr, o, rb, e2));
+    CHECK(scene_resident("scene-A") && scene_resident("scene-B") && !scene_resident("scene-C") && !scene_resident(""));
+    o.sceneKey = "scene-A"; CHECK(run(meshes, nullptr, o, ra2, e2));
+    CHECK(ra2.values == ra.values && ra.values == r1.values);
+    o.residentScenes = 1;
+    o.sceneKey = "scene-C"; CHECK(run(meshes, nullptr, o, ra2, e2));
+    CHECK(scene_resident("scene-C") && !scene_resident("scene-A") && !scene_resident("scene-B"));
+
+    // cancel: a set flag stops the run with "cancelled"
+    std::atomic<bool> stop{true};
+    o.cancel = &stop;
+    e2.clear();
+    CHECK(!run(meshes, nullptr, o, ra2, e2) && e2 == "cancelled");
   }
   return failures;
 }

@@ -138,20 +138,26 @@ it('dmeshStems', () => {
 
 describe('runRemote', () => {
   const manifest = { columns: ['sunhours_front', 'radiation_front'], duration_h: 1, dirs: { sky: 145, ground: 145, sun: 1 }, meshes: [{ name: 'box', first: 0, count: 2 }], run_s: 0.1, cache: { response: 'miss' } };
-  it('names meshes by id, uploads the missing ones once, decodes values_b64', async () => {
+  const values_b64 = Buffer.from(new Float64Array([1, 2.5, 3, 4]).buffer).toString('base64');
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+  it('submits a job by mesh ids, uploads the missing ones once, follows the queue, decodes values_b64', async () => {
     const m = fromThree([box()])[0];
     m.id = 'id-1';
-    const calls: { url: string; method?: string; body?: unknown }[] = [];
-    let posts = 0;
+    const calls: { url: string; method?: string; body?: unknown; headers?: HeadersInit }[] = [];
+    let posts = 0, polls = 0;
     const fetchMock = (async (url: string, init?: RequestInit) => {
-      calls.push({ url, method: init?.method, body: init?.body });
+      calls.push({ url, method: init?.method, body: init?.body, headers: init?.headers });
       if (init?.method === 'PUT') return new Response(null, { status: 204 });
-      if (++posts === 1) return new Response(JSON.stringify({ missing: ['id-1'] }), { status: 404 });
-      const values_b64 = Buffer.from(new Float64Array([1, 2.5, 3, 4]).buffer).toString('base64');
-      return new Response(JSON.stringify({ ...manifest, values_b64 }), { status: 200 });
+      if (init?.method === 'POST') return ++posts === 1 ? json({ missing: ['id-1'] }, 404) : json({ id: 'j1', state: 'queued', position: 1 }, 202);
+      return ++polls === 1 ? json({ id: 'j1', state: 'running', position: 0 }) : json({ id: 'j1', state: 'done', ...manifest, values_b64 });
     }) as unknown as typeof fetch;
-    const r = await runRemote('http://h/', { sensors: [m], args: ['--quantity', 'sunhours'], fetch: fetchMock });
-    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(['POST http://h/run', 'PUT http://h/mesh/id-1?name=box', 'POST http://h/run']);
+    const seen: string[] = [];
+    const r = await runRemote('http://h/', { sensors: [m], args: ['--quantity', 'sunhours'], clientId: 'tab-1', onStatus: (j) => seen.push(`${j.state}:${j.position}`), fetch: fetchMock });
+    expect(calls.map((c) => `${c.method ?? 'GET'} ${c.url}`)).toEqual([
+      'POST http://h/jobs', 'PUT http://h/mesh/id-1?name=box', 'POST http://h/jobs', 'GET http://h/jobs/j1?wait=25', 'GET http://h/jobs/j1?wait=25',
+    ]);
+    expect(seen).toEqual(['queued:1', 'running:0']);
+    expect(calls[0].headers).toEqual({ 'X-Client-Id': 'tab-1' });
     expect(String.fromCharCode(...(calls[1].body as Uint8Array).subarray(0, 4))).toBe('DLM1');
     const fd = calls[2].body as FormData;
     expect(fd.getAll('sensors')).toEqual(['id-1']);
@@ -171,6 +177,26 @@ describe('runRemote', () => {
     expect(seen[0].get('epw_url')).toBe('https://x/y.epw');
     await expect(runRemote('http://h', { sensors, epw: new Blob(['LOCATION,x']), fetch: fetchMock })).rejects.toThrow(/400/);
     expect(seen[1].get('epw')).toBeInstanceOf(Blob);
+  });
+  it('a failed job rejects with its status and message; abort cancels the job on the server', async () => {
+    const failed = (async (_u: string, init?: RequestInit) => init?.method === 'POST'
+      ? json({ id: 'j2', state: 'queued', position: 0 }, 202)
+      : json({ id: 'j2', state: 'error', status: 500, error: 'error: out of memory' })) as unknown as typeof fetch;
+    await expect(runRemote('http://h', { sensors: fromThree([box()]), fetch: failed })).rejects.toThrow(/job j2 error \(500\): error: out of memory/);
+
+    const ctrl = new AbortController(), calls: string[] = [];
+    const hanging = (async (url: string, init?: RequestInit) => {
+      calls.push(`${init?.method ?? 'GET'} ${url}`);
+      if (init?.method === 'POST') return json({ id: 'j3', state: 'queued', position: 2 }, 202);
+      if (init?.method === 'DELETE') return json({ id: 'j3', state: 'cancelled' });
+      return new Promise<Response>((_res, rej) => { // like fetch: an aborted signal rejects at once, a later abort when it fires
+        const stop = () => rej(new DOMException('aborted', 'AbortError'));
+        if (init?.signal?.aborted) stop(); else init?.signal?.addEventListener('abort', stop);
+      });
+    }) as unknown as typeof fetch;
+    const p = runRemote('http://h', { sensors: fromThree([box()]), signal: ctrl.signal, onStatus: () => ctrl.abort(), fetch: hanging });
+    await expect(p).rejects.toThrow(/aborted/);
+    expect(calls).toEqual(['POST http://h/jobs', 'GET http://h/jobs/j3?wait=25', 'DELETE http://h/jobs/j3']);
   });
 });
 

@@ -26,12 +26,19 @@ inline float3 neg(float3 v) { return float3{-v.x, -v.y, -v.z}; }
 // gpu_build / upload / grow free or reuse their previous buffers, so one Gpu serves every run of the process.
 // `key` is the Options::sceneKey whose occluder triangles / GAS are resident (empty = none). Not thread-safe:
 // run() is one-at-a-time, as the CLI and the server (one GPU, a mutex) use it.
-struct Resident {
-  Gpu* gpu = nullptr;
+// `cur` is the scene installed in the Gpu; `parked` holds up to Options::residentScenes - 1 other scenes' GAS in VRAM,
+// most recent first, so users who alternate between scenes do not rebuild each other's.
+struct Scene {
   std::string key;
-  double c[3] = {0, 0, 0};   // bbox centre the resident triangles were recentred by
+  double c[3] = {0, 0, 0};   // bbox centre the scene's triangles were recentred by
   size_t nTris = 0;
   int skipped = 0;
+  GasSlot gas;               // parked scenes only
+};
+struct Resident {
+  Gpu* gpu = nullptr;
+  Scene cur;
+  std::vector<Scene> parked;
 };
 Resident& resident() { static Resident r; return r; }
 
@@ -53,7 +60,14 @@ bool npy_write_header(std::FILE* f, size_t rows, size_t cols, const char* descr)
   return true;
 }
 
+bool scene_resident(const std::string& key) {
+  const Resident& R = resident();
+  if (key.empty() || !R.gpu) return false;
+  return key == R.cur.key || std::any_of(R.parked.begin(), R.parked.end(), [&](const Scene& s) { return s.key == key; });
+}
+
 bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, Result& out, std::string& err) {
+  const auto cancelled = [&] { if (opt.cancel && opt.cancel->load()) { err = "cancelled"; return true; } return false; };
   // ---- validation --------------------------------------------------------------------------------------------
   const bool ladybug = opt.mode == Mode::Ladybug;
   bool needWeather = false, wantVis = false, wantRad = false;
@@ -87,11 +101,14 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
 
   // ---- geometry ------------------------------------------------------------------------------------------------
   Resident& R = resident();
-  const bool reuse = !opt.sceneKey.empty() && opt.sceneKey == R.key && R.gpu;   // same meshes + selfOcclude as last run
+  const std::string& key = opt.sceneKey;
+  const bool installed = !key.empty() && R.gpu && key == R.cur.key;   // same meshes + selfOcclude as the scene in the Gpu
+  const auto parkedAt = [&] { return std::find_if(R.parked.begin(), R.parked.end(), [&](const Scene& s) { return s.key == key; }); };
+  const bool reuse = installed || (!key.empty() && R.gpu && parkedAt() != R.parked.end());
   double c[3];
   Tris tris;
   int skipped = 0;
-  if (reuse) { std::copy(R.c, R.c + 3, c); skipped = R.skipped; }
+  if (reuse) { const Scene& s = installed ? R.cur : *parkedAt(); std::copy(s.c, s.c + 3, c); skipped = s.skipped; }
   else {
     bbox_centre(meshes, c);
     for (const Mesh& m : meshes)
@@ -112,7 +129,7 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   const size_t nSens = sens.p.size();
   if (nSens == 0) { err = "no sensor elements (no sensor meshes, or all faces degenerate)"; return false; }
   if (opt.verbose) {
-    std::fprintf(stderr, "info: %zu sensors, %zu triangles%s, %zu steps (%.1f h)\n", nSens, reuse ? R.nTris : tris.i.size(),
+    std::fprintf(stderr, "info: %zu sensors, %zu triangles%s, %zu steps (%.1f h)\n", nSens, reuse ? (installed ? R.cur : *parkedAt()).nTris : tris.i.size(),
                  reuse ? " (scene reused)" : "", T, durationHours);
     if (skipped) std::fprintf(stderr, "warn: %d degenerate faces skipped in occluders\n", skipped);
     if (!warn.empty()) std::fprintf(stderr, "warn: %s\n", warn.c_str());
@@ -126,6 +143,7 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   }
 
   // ---- direction table: [sky P*K | ground P*K (= -sky) | sun] ------------------------------------------------------
+  if (cancelled()) return false;
   Patches pa = make_patches(opt.mf);
   const int P = pa.P;
   std::vector<float3> D;
@@ -311,12 +329,28 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
     if (!bf || !npy_write_header(bf.get(), nSens, nWords, "<u4")) { err = "cannot write " + opt.dumpBitsPath; return false; }
   }
   if (nDir > 0) {
+    if (cancelled()) return false;
     if (!R.gpu && !(R.gpu = gpu_init(err))) return false;
     Gpu* g = R.gpu;
-    if (!reuse) {
-      R.key.clear();   // a failed build leaves nothing resident
-      if (!gpu_build(*g, tris, err)) return false;
-      R.key = opt.sceneKey; std::copy(c, c + 3, R.c); R.nTris = tris.i.size(); R.skipped = skipped;
+    if (!installed) {
+      // park the installed keyed scene when more than one may stay resident; an unparked GAS is freed by attach / build
+      if (!R.cur.key.empty() && opt.residentScenes > 1) { Scene s = R.cur; s.gas = gpu_detach(*g); R.parked.insert(R.parked.begin(), s); }
+      R.cur = Scene{};   // a failed build leaves nothing installed
+      if (auto it = parkedAt(); reuse && it != R.parked.end()) {
+        Scene s = *it;
+        R.parked.erase(it);
+        gpu_attach(*g, s.gas);
+        s.gas = GasSlot{};
+        R.cur = s;
+      } else {
+        if (!gpu_build(*g, tris, err)) return false;
+        R.cur.key = key; std::copy(c, c + 3, R.cur.c); R.cur.nTris = tris.i.size(); R.cur.skipped = skipped;
+      }
+      // ponytail: 1 GB VRAM floor for parked scenes; derive it from the run's own needs if large scenes start to fail
+      while (!R.parked.empty() && (R.parked.size() + 1 > size_t(std::max(1, opt.residentScenes)) || gpu_free_bytes() < (size_t(1) << 30))) {
+        gpu_free(R.parked.back().gas);
+        R.parked.pop_back();
+      }
     }
     if (!gpu_set_scene(*g, sens, D, err)) return false;
     // ponytail: 256 MB cap on both the bits buffer and the series tile; make it a device-memory fraction if it ever thrashes
@@ -336,6 +370,7 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
       sunW[j] = (ladybug || cidx < 0 || dtj <= 0) ? 0.f : static_cast<float>((seriesVis ? sunVis[j] : sunRad[j] * 1000.0) / dtj);
     }
     for (size_t i0 = 0; i0 < nSens; i0 += ncMax) {
+      if (cancelled()) return false;
       const size_t nc = std::min(ncMax, nSens - i0);
       if (!gpu_trace(*g, i0, nc, flags, err)) return false;
       tmp.assign(nc, 0.0);

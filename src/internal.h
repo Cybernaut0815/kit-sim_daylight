@@ -67,6 +67,12 @@ struct Gpu;
 Gpu* gpu_init(std::string& err);
 void gpu_destroy(Gpu* g);
 bool gpu_build(Gpu& g, const Tris& t, std::string& err);                                   // GAS, compacted; inputs freed
+// A built acceleration structure moved out of the Gpu, kept in VRAM for a later run of the same scene.
+struct GasSlot { void* dGas = nullptr; unsigned long long gas = 0; size_t bytes = 0; };
+GasSlot gpu_detach(Gpu& g);              // the current GAS moves out; the Gpu then has none
+void gpu_attach(Gpu& g, GasSlot s);      // frees the current GAS and installs s
+void gpu_free(GasSlot& s);
+size_t gpu_free_bytes();                 // free device memory (cudaMemGetInfo), 0 on error
 bool gpu_set_scene(Gpu& g, const Sensors& s, const std::vector<float3>& dirs, std::string& err);   // resident sensors + directions
 // Trace sensors [i0, i0+nc) against all directions; bits stay on device, word-major bits[w*nc + i].
 // Adaptive TDR-safe sub-launches inside (first 4096 sensors timed, then scaled to ~150 ms per launch).

@@ -236,6 +236,19 @@ bool gpu_build(Gpu& g, const Tris& t, std::string& err) {
   return ok;
 }
 
+static_assert(sizeof(OptixTraversableHandle) == sizeof(unsigned long long), "GasSlot::gas holds an OptixTraversableHandle");
+GasSlot gpu_detach(Gpu& g) {
+  GasSlot s{g.dGas, g.gas, g.stats.gasBytes};
+  g.dGas = nullptr; g.gas = 0; g.stats.gasBytes = 0;
+  return s;
+}
+void gpu_attach(Gpu& g, GasSlot s) {
+  cudaFree(g.dGas);
+  g.dGas = s.dGas; g.gas = s.gas; g.stats.gasBytes = s.bytes;
+}
+void gpu_free(GasSlot& s) { cudaFree(s.dGas); s = GasSlot{}; }
+size_t gpu_free_bytes() { size_t f = 0, t = 0; return cudaMemGetInfo(&f, &t) == cudaSuccess ? f : 0; }
+
 bool gpu_set_scene(Gpu& g, const Sensors& s, const std::vector<float3>& dirs, std::string& err) {
   g.nSensors = s.p.size(); g.nDir = dirs.size(); g.nWords = (g.nDir + 31) / 32;
   return upload((void**)&g.dP, s.p.data(), s.p.size() * sizeof(float3), err) &&

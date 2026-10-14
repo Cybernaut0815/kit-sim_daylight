@@ -25,7 +25,11 @@ Inputs from memory (uploads, no files): `read_dmesh(data, size, name, meshes, er
 `read_epw(istream, label, w, err)` parses EPW text. A long-lived process (a server) sets `Options::sceneKey` to an
 identity of its meshes + `selfOcclude`: when the key equals the previous run's, the occluder triangles and the OptiX
 acceleration structure stay resident and only sensors, directions and the trace are redone; the GPU context is kept
-for the whole process either way. `src/cli.h` (`daylight::cli::parse` / `prepare` / `manifest_json`) exposes the CLI's
+for the whole process either way. `Options::residentScenes = N` keeps up to N keyed scenes in VRAM (least recently
+used freed first, and while less than 1 GB is free), so users who alternate between models do not rebuild each other's;
+`scene_resident(key)` tells whether a run would reuse one. `Options::cancel` points to an `std::atomic<bool>` another
+thread may set: `run()` then stops at its next check (before the sky model, before the GPU, per trace chunk) and fails
+with "cancelled". `run()` itself is one call at a time per process (one GPU, one owner thread). `src/cli.h` (`daylight::cli::parse` / `prepare` / `manifest_json`) exposes the CLI's
 flag parsing, weather / time rules and manifest for front ends that accept CLI flags verbatim.
 
 **C++ with USD.** `bindings/cpp` adds `read_usd` (LightUSD: sublayers, references, payloads, xforms, up axis,

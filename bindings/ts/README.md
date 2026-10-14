@@ -66,10 +66,13 @@ await applyToThree(mesh, values.slice(first, first + count).map((r) => r[col]));
   `sensors`/`context` accept `ObjMesh[]` (written as one `<name>.dmesh` per mesh, name sanitised to `[A-Za-z0-9._-]`
   and made unique; the manifest's mesh names are the file stems) or OBJ text (written as one `.obj`).
   Needs Node >= 20 and the GPU build of the core.
-- `runRemote(url, { sensors, context?, epw?, args? })`: `POST url/run` with the meshes' `id`s (minted as UUIDs when
-  absent), `PUT url/mesh/<id>?name=<stem>` once for every id the server reports missing, then one retry; `epw` is a
-  `Blob` (uploaded) or `{ url }` (fetched by the server through its allowlisted proxy cache); returns
-  `{ values, columns, manifest, cache }` from the server's JSON (`values_b64` decoded). Browser-safe.
+- `runRemote(url, { sensors, context?, epw?, args?, signal?, clientId?, onStatus? })`: submits a job
+  (`POST url/jobs`) with the meshes' `id`s (minted as UUIDs when absent), `PUT url/mesh/<id>?name=<stem>` once for
+  every id the server reports missing, then one retry; long-polls `GET url/jobs/<id>?wait=25` (`onStatus` sees each
+  queued / running state, with the queue position); aborting `signal` cancels the job on the server; `clientId` is
+  sent as `X-Client-Id` for the per-client job limit; `epw` is a `Blob` (uploaded) or `{ url }` (fetched by the server
+  through its allowlisted proxy cache); returns `{ values, columns, manifest, cache }` (`values_b64` decoded).
+  Browser-safe. The full API is self-documented by the server at `/docs` and `/openapi.json`.
 - `dmeshStems(names, fallback?)`: the stem / mesh-name sanitiser both runners use (`[^A-Za-z0-9._-]` -> `_`, unique
   case-insensitively).
 - `parseNpy(bytes, cols)`: parses a core `--out FILE.npy` (NumPy v1.0 `<f8`, C order) into rows of `cols`.

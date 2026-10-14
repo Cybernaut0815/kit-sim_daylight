@@ -236,19 +236,36 @@ export interface RemoteManifest {
   cache?: Record<string, string>;
 }
 
+/** A job on `daylight_server` (`/jobs/{id}`): position counts the jobs ahead of a queued one. */
+export interface RemoteJob {
+  id: string;
+  state: 'queued' | 'running' | 'done' | 'error' | 'cancelled';
+  position?: number;
+  error?: string;  // state error / cancelled: the server's message
+  status?: number; // state error: the HTTP status POST /run would have answered (400 usage, 500 runtime)
+}
+
 /**
- * Browser or Node: runs the core on a `daylight_server`. Meshes travel by id (`ObjMesh.id`; a UUID is minted here
- * when absent): `POST <url>/run` names them, and when the server answers 404 `{missing}` the `.dmesh` bytes go up
- * once via `PUT <url>/mesh/<id>?name=<stem>` before one retry, so a re-run with other settings sends no geometry.
- * `epw` is a Blob (uploaded) or `{ url }` (the server fetches it through its allowlisted proxy cache). `args` are
- * CLI flags verbatim (no files). Rejects with the server's text on 4xx / 5xx. One Float64Array per element.
+ * Browser or Node: runs the core on a `daylight_server` as a queued job, so several users share the GPU. Meshes travel
+ * by id (`ObjMesh.id`; a UUID is minted here when absent): `POST <url>/jobs` names them, and when the server answers
+ * 404 `{missing}` the `.dmesh` bytes go up once via `PUT <url>/mesh/<id>?name=<stem>` before one retry, so a re-run
+ * with other settings sends no geometry. The job is then long-polled (`GET /jobs/<id>?wait=25`); `onStatus` sees every
+ * queued / running state. Aborting `signal` cancels the job on the server (`DELETE /jobs/<id>`). `epw` is a Blob
+ * (uploaded) or `{ url }` (the server fetches it through its allowlisted proxy cache). `args` are CLI flags verbatim
+ * (no files). `clientId` (header `X-Client-Id`) identifies this client for the per-client job limit. Rejects with the
+ * server's text on 4xx / 5xx or a failed job. One Float64Array per element.
  */
 export async function runRemote(
   url: string,
-  input: { sensors: ObjMesh[]; context?: ObjMesh[]; epw?: Blob | { url: string }; args?: string[]; fetch?: typeof globalThis.fetch },
+  input: {
+    sensors: ObjMesh[]; context?: ObjMesh[]; epw?: Blob | { url: string }; args?: string[];
+    signal?: AbortSignal; clientId?: string; onStatus?: (job: RemoteJob) => void; fetch?: typeof globalThis.fetch;
+  },
 ): Promise<{ values: Float64Array[]; columns: string[]; manifest: RemoteManifest; cache?: Record<string, string> }> {
   const f = input.fetch ?? globalThis.fetch;
   const base = url.replace(/\/$/, '');
+  const headers: Record<string, string> = input.clientId ? { 'X-Client-Id': input.clientId } : {};
+  const req = (path: string, init: RequestInit = {}) => f(`${base}${path}`, { ...init, headers, signal: input.signal });
   const meshes = [...input.sensors, ...(input.context ?? [])];
   for (const m of meshes) m.id ??= crypto.randomUUID();
   const stems = dmeshStems(meshes.map((m) => m.name));
@@ -261,19 +278,32 @@ export async function runRemote(
     for (const a of input.args ?? []) fd.append('args', a);
     return fd;
   };
-  let res = await f(`${base}/run`, { method: 'POST', body: body() });
+  let res = await req('/jobs', { method: 'POST', body: body() });
   if (res.status === 404) {
     const { missing } = (await res.json()) as { missing: string[] };
     await Promise.all(missing.map(async (id) => {
       const k = meshes.findIndex((m) => m.id === id);
-      if (k < 0) throw new Error(`${base}/run asked for an unknown mesh id ${id}`);
-      const put = await f(`${base}/mesh/${encodeURIComponent(id)}?name=${encodeURIComponent(stems[k])}`, { method: 'PUT', body: toDmesh(meshes[k]) });
+      if (k < 0) throw new Error(`${base}/jobs asked for an unknown mesh id ${id}`);
+      const put = await req(`/mesh/${encodeURIComponent(id)}?name=${encodeURIComponent(stems[k])}`, { method: 'PUT', body: toDmesh(meshes[k]) });
       if (!put.ok) throw new Error(`PUT ${base}/mesh/${id} failed (${put.status}): ${(await put.text()).trim()}`);
     }));
-    res = await f(`${base}/run`, { method: 'POST', body: body() });
+    res = await req('/jobs', { method: 'POST', body: body() });
   }
-  if (!res.ok) throw new Error(`${base}/run failed (${res.status}): ${(await res.text()).trim()}`);
-  const m = (await res.json()) as RemoteManifest & { values_b64: string };
+  if (!res.ok) throw new Error(`${base}/jobs failed (${res.status}): ${(await res.text()).trim()}`);
+  let job = (await res.json()) as RemoteJob & Partial<RemoteManifest> & { values_b64?: string };
+  try {
+    while (job.state === 'queued' || job.state === 'running') {
+      input.onStatus?.(job);
+      const poll = await req(`/jobs/${encodeURIComponent(job.id)}?wait=25`);
+      if (!poll.ok) throw new Error(`${base}/jobs/${job.id} failed (${poll.status}): ${(await poll.text()).trim()}`);
+      job = await poll.json();
+    }
+  } catch (e) {
+    if (input.signal?.aborted) f(`${base}/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE', headers }).catch(() => undefined); // free the GPU for others
+    throw e;
+  }
+  if (job.state !== 'done') throw new Error(`${base} job ${job.id} ${job.state}${job.status ? ` (${job.status})` : ''}: ${(job.error ?? '').trim()}`);
+  const m = job as RemoteJob & RemoteManifest & { values_b64: string };
   const bin = atob(m.values_b64), bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   const data = new Float64Array(bytes.buffer), cols = m.columns.length, values: Float64Array[] = [];

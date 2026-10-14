@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // daylight: GPU annual daylight / solar simulation. Public API: generic face-vertex mesh in, value list out.
 #pragma once
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -61,6 +62,8 @@ struct Options {
   // triangles and the acceleration structure of that run stay resident and are reused (the caller guarantees the
   // meshes and selfOcclude are unchanged). Empty (the CLI): rebuilt every run. The GPU context is kept either way.
   std::string sceneKey;
+  int residentScenes = 1;              // keyed scenes kept in VRAM (most recent first); more than 1 lets users alternate cheaply
+  const std::atomic<bool>* cancel = nullptr;   // set by another thread: run() stops at its next check and fails with "cancelled"
   bool verbose = false;
 };
 
@@ -86,7 +89,9 @@ bool read_epw(std::istream& in, const std::string& label, Weather& out, std::str
 // every hour cloudless, so radiation results are an upper bound, not a climate estimate. Sun at each hour midpoint
 // (NOAA position); turbidity >= 1 (3 = clean temperate air, 5-7 = urban/humid).
 bool clear_sky_weather(double lat, double lon, double tz, double turbidity, double altitude, Weather& out, std::string& err);
-// weather may be null only when every quantity is SunHours.
+// weather may be null only when every quantity is SunHours. One call at a time per process (the GPU state is shared).
 bool run(const std::vector<Mesh>& meshes, const Weather* weather, const Options& opt, Result& out, std::string& err);
+// True when a run() with this Options::sceneKey would reuse a resident scene (call from the thread that calls run()).
+bool scene_resident(const std::string& sceneKey);
 
 }  // namespace daylight
