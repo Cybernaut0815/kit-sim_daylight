@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // Checks for solar.cpp: NOAA sun vs ladybug Sunpath goldens, EPW reader, steps, timestamp parsing.
+#include "cli.h"
 #include "internal.h"
 #include <cmath>
 #include <cstdio>
@@ -173,6 +174,42 @@ int check_solar(const char*) {
   CHECK(!make_steps(opt, &bos, st, err));
   opt.t1 = 20; opt.stepMin = 0;
   CHECK(!make_steps(opt, &bos, st, err));
+  // ---- steps: --hours, the same hours of every day (analysis period)
+  opt.stepMin = 60;
+  CHECK(parse_hoy("06-01T08:00", false, opt.t0, err) && parse_hoy("06-03T18:00", false, opt.t1, err));
+  CHECK(make_steps(opt, &bos, st, err) && st.size() == 58);   // full day: the continuous range
+  opt.dayFrom = 480; opt.dayTo = 1080;
+  CHECK(make_steps(opt, &bos, st, err) && st.size() == 30);
+  if (st.size() == 30) {
+    CHECK(st[0].day == 1 && st[0].hour == 8 && st[9].hour == 17 && st[10].day == 2 && st[10].hour == 8 && st[29].day == 3 && st[29].hour == 17);
+    CHECK(st[0].dt == 1 && st[10].hoy == st[0].hoy + 24);
+  }
+  opt.dayFrom = 120; opt.dayTo = 180;   // 02:00-03:00 misses 06-01 08:00 .. 06-03 18:00 except days 2 and 3
+  CHECK(make_steps(opt, &bos, st, err) && st.size() == 2 && st[0].day == 2 && st[0].hour == 2);
+  opt.t1 = opt.t0 + 10;
+  CHECK(!make_steps(opt, &bos, st, err));   // no step inside the window
+  opt.dayFrom = 0; opt.dayTo = 1440;
+  {
+    const auto run = [](std::vector<const char*> v, cli::Args& a, std::string& e) {
+      v.insert(v.begin(), "daylight");
+      int rc = cli::parse((int)v.size(), const_cast<char**>(v.data()), a, e);
+      Weather w;
+      bool have = false;
+      return rc ? rc : cli::prepare(a, w, have, e);
+    };
+    cli::Args a;
+    CHECK(run({"--lat", "42", "--lon", "-71", "--from", "06-01T08:00", "--to", "06-03T18:00", "--hours", "08:00-18:00"}, a, err) == 0 &&
+          a.opt.dayFrom == 480 && a.opt.dayTo == 1080);
+    cli::Args b;
+    CHECK(run({"--lat", "42", "--lon", "-71", "--from", "06-01T00:00", "--to", "06-02T00:00", "--hours", "09:30-24:00"}, b, err) == 0 &&
+          b.opt.dayFrom == 570 && b.opt.dayTo == 1440);
+    for (const char* bad : {"18:00-08:00", "08:00-08:00", "08:00-24:01", "8-18", "08:00-18:00x", "08:60-18:00"}) {
+      cli::Args c;
+      CHECK(run({"--lat", "42", "--lon", "-71", "--from", "06-01T08:00", "--to", "06-03T18:00", "--hours", bad}, c, err) == 1);
+    }
+    cli::Args d;
+    CHECK(run({"--lat", "42", "--lon", "-71", "--time", "06-01T08:00", "--hours", "08:00-18:00"}, d, err) == 1 && err == "--hours needs --from/--to");
+  }
 
   // ---- parse_hoy / hoy_to_date round trips
   double hoy; int month, day; double hour;

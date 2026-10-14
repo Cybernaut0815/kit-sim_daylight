@@ -21,8 +21,8 @@ offset 32  float64   xyz[3 * n_points]      world metres, Z-up
 
 Positional files are analysed (sensors) and, by default, also block rays; `--context FILE` files block only (roles
 are per file). Location and time: `--epw FILE` gives weather and location, `--clear-sky` synthesises weather for
-`--lat --lon`, `--lat --lon --tz` alone serve sun-hour runs; `--time`, `--from/--to/--step` select instants, the
-default is annual.
+`--lat --lon`, `--lat --lon --tz` alone serve sun-hour runs; `--time`, `--from/--to/--step` (plus `--hours` for the
+same hours of every day) select instants, the default is annual.
 
 ## Semantics
 

@@ -56,6 +56,7 @@ struct Options {
   double lat = NAN, lon = NAN, tz = NAN;        // override EPW header / no-EPW runs
   double t0 = NAN, t1 = NAN;          // hour-of-year range [t0, t1); NAN = annual over EPW rows (midpoints)
   int stepMin = 60;                   // step for ranges, minutes
+  double dayFrom = 0, dayTo = 1440;   // ranges: only steps whose time of day (minutes) is in [dayFrom, dayTo) (--hours)
   std::string seriesPath;             // .npy time series sink (+ .hoys.txt); empty = off
   std::string dumpBitsPath, dumpSky, dumpSun;   // validation dumps; empty = off (GPU selection: CUDA_VISIBLE_DEVICES)
   // Scene identity for long-lived callers (a server). Non-empty and equal to the previous run's key: the occluder

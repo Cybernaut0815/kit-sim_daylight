@@ -189,6 +189,8 @@ bool make_steps(const Options& opt, const Weather* w, std::vector<Step>& out, st
   for (int k = 0;; ++k) {
     double hoy = opt.t0 + k * step;
     if (hoy >= t1 - 1e-9) break;
+    const double hod = (hoy - 24 * std::floor(hoy / 24)) * 60;   // minutes into the day: the --hours window
+    if (hod < opt.dayFrom - 1e-6 || hod >= opt.dayTo - 1e-6) continue;
     Step s;
     s.hoy = hoy; s.jd = (int)(hoy / 24) + 1; s.dt = step;
     hoy_to_date(hoy, leap, s.month, s.day, s.hour);
@@ -196,6 +198,7 @@ bool make_steps(const Options& opt, const Weather* w, std::vector<Step>& out, st
     if (w && r < w->dni.size()) { s.dni = w->dni[r]; s.dhi = w->dhi[r]; }
     out.push_back(s);
   }
+  if (out.empty()) { err = "no step falls inside the --hours window"; return false; }
   return true;
 }
 

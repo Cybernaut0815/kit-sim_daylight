@@ -22,6 +22,7 @@ is given for in-process callers; the Python and TypeScript `run(..., args=[...])
 | `--time TS` | `[YYYY-]MM-DDTHH:MM` | | evaluate one instant (year ignored; Feb 29 only with a leap EPW) | `t0` |
 | `--from TS --to TS` | timestamps | | evaluate the range `[from, to)` in `--step` increments | `t0`, `t1` |
 | `--step MIN` | minutes | `60` | step of `--from/--to` (DNI/DHI of the containing hour) | `stepMin` |
+| `--hours HH:MM-HH:MM` | times of day, end up to `24:00` | whole day | with `--from/--to`: keep only the steps in `[start, end)` of every day, e.g. 1 Jun to 31 Aug 09:00 to 17:00 (an analysis period) | `dayFrom`, `dayTo` (minutes) |
 | (no time flags) | | | annual: one step per weather row at the mid-hour | `t0 = t1 = NAN` |
 | `--sky-density` | `1` \| `2` \| `4` | `1` | sky patches 145 / 577 / 2305 (Reinhart MF); ladybug mode: 1 or 2 | `mf` |
 | `--patch-samples K` | square number | `1` | physical mode: K stratified rays per patch (4, 9, 16 smooth the patch discretisation) | `patchSamples` |

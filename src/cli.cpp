@@ -28,6 +28,7 @@ const char* const kUsage =
     "  --turbidity TL           Linke turbidity for --clear-sky (default 3)   --altitude M  site altitude (default 0)\n"
     "  --tz H                   defaults to round(lon / 15) when --lat --lon are given without --tz\n"
     "  --time [YYYY-]MM-DDTHH:MM | --from TS --to TS [--step MIN]   default: annual over the EPW rows\n"
+    "  --hours HH:MM-HH:MM      with --from/--to: only these hours of every day (analysis period)\n"
     "  --sky-density 1|2|4  --patch-samples K  --ground RHO  --north DEG  --offset M  --no-self-occlude\n"
     "  --out FILE[.npy]         values (text rows, or float64 [N x C] NumPy when .npy) + FILE.json manifest\n"
     "  --timeseries FILE.npy  --dump-bits FILE.npy  --dump-sky FILE  --dump-sun FILE\n"
@@ -77,6 +78,15 @@ int parse(int argc, char** argv, Args& a, std::string& err) {
     else if (f == "--from") { if (!(v = need(i, "--from"))) return 1; a.fromStr = v; }
     else if (f == "--to") { if (!(v = need(i, "--to"))) return 1; a.toStr = v; }
     else if (f == "--step") { if (!(v = need(i, "--step"))) return 1; a.opt.stepMin = std::atoi(v); if (a.opt.stepMin <= 0) { err = "--step must be positive minutes"; return 1; } }
+    else if (f == "--hours") {
+      if (!(v = need(i, "--hours"))) return 1;
+      int h0, m0, h1, m1;
+      char end;
+      if (std::sscanf(v, "%d:%d-%d:%d%c", &h0, &m0, &h1, &m1, &end) != 4 || h0 < 0 || m0 < 0 || m0 > 59 || m1 < 0 || m1 > 59 ||
+          h0 * 60 + m0 >= h1 * 60 + m1 || h1 * 60 + m1 > 1440) { err = "--hours HH:MM-HH:MM with start < end <= 24:00"; return 1; }
+      a.opt.dayFrom = h0 * 60 + m0;
+      a.opt.dayTo = h1 * 60 + m1;
+    }
     else if (f == "--sky-density") { if (!(v = need(i, "--sky-density"))) return 1; a.opt.mf = std::atoi(v); }
     else if (f == "--patch-samples") { if (!(v = need(i, "--patch-samples"))) return 1; a.opt.patchSamples = std::atoi(v); }
     else if (f == "--ground") { if (!(v = need(i, "--ground"))) return 1; a.opt.ground = std::atof(v); }
@@ -125,6 +135,7 @@ int prepare(Args& a, Weather& weather, bool& haveWeather, std::string& err) {
     if (a.toStr.empty()) { err = "--from needs --to"; return 1; }
     if (!parse_hoy(a.fromStr, leap, a.opt.t0, err) || !parse_hoy(a.toStr, leap, a.opt.t1, err)) return 1;
   } else if (!a.toStr.empty()) { err = "--to needs --from"; return 1; }
+  if ((a.opt.dayFrom > 0 || a.opt.dayTo < 1440) && a.fromStr.empty()) { err = "--hours needs --from/--to"; return 1; }
   return 0;
 }
 
