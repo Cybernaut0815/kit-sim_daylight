@@ -189,6 +189,12 @@ int check_solar(const char*) {
   opt.t1 = opt.t0 + 10;
   CHECK(!make_steps(opt, &bos, st, err));   // no step inside the window
   opt.dayFrom = 0; opt.dayTo = 1440;
+  opt.stepMin = 10;   // 1/6 h is inexact: midnight steps land at 24n - eps and must still count as 00:00
+  CHECK(parse_hoy("01-01T00:20", false, opt.t0, err) && parse_hoy("01-05T00:20", false, opt.t1, err));
+  CHECK(make_steps(opt, &bos, st, err) && st.size() == 576);
+  opt.dayTo = 60;   // 00:00-01:00 of every day, the 00:00 steps included: 4 (from 00:20) + 3 x 6 + 2 (to 00:20)
+  CHECK(make_steps(opt, &bos, st, err) && st.size() == 24);
+  opt.dayTo = 1440; opt.stepMin = 60;
   {
     const auto run = [](std::vector<const char*> v, cli::Args& a, std::string& e) {
       v.insert(v.begin(), "daylight");

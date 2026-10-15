@@ -189,7 +189,8 @@ bool make_steps(const Options& opt, const Weather* w, std::vector<Step>& out, st
   for (int k = 0;; ++k) {
     double hoy = opt.t0 + k * step;
     if (hoy >= t1 - 1e-9) break;
-    const double hod = (hoy - 24 * std::floor(hoy / 24)) * 60;   // minutes into the day: the --hours window
+    double hod = (hoy - 24 * std::floor(hoy / 24)) * 60;   // minutes into the day: the --hours window
+    if (hod >= 1440 - 1e-6) hod -= 1440;                    // a midnight step that lands at 24n - eps (step 10 min)
     if (hod < opt.dayFrom - 1e-6 || hod >= opt.dayTo - 1e-6) continue;
     Step s;
     s.hoy = hoy; s.jd = (int)(hoy / 24) + 1; s.dt = step;
