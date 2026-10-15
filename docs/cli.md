@@ -13,14 +13,14 @@ is given for in-process callers; the Python and TypeScript `run(..., args=[...])
 | `--sides` | `front` \| `back` \| `both` | `front` | receiving hemisphere of each element; `both` = two columns per quantity (`_front`, `_back`) | `sides` |
 | `--cull-backfaces` | flag | off | occluder triangles block only from their front (winding) side; default both sides | `cullBackfaces` |
 | `--no-self-occlude` | flag | off | sensor meshes do not block rays (only `--context` files do) | `selfOcclude = false` |
-| `--epw FILE` | EPW path | none | hourly weather (DNI/DHI) and location from the header; 8760 or 8784 rows, hour-ending in the file's own zone, sun evaluated at mid-hour. PVGIS files (recognised by their `Irradiance Time Offset` comment) are written up to an hour ahead of their hour at many sites: the irradiance is moved back to its sun by the offset measured from the data (`-v` prints it) | `read_epw` -> `Weather` |
+| `--epw FILE` | EPW path | none | hourly weather (DNI/DHI) and location from the header; 8760 or 8784 rows, hour-ending in the file's own zone, sun evaluated at mid-hour. PVGIS files (recognised by their `Irradiance Time Offset` comment) built from its satellite series are written about 0.7 h ahead of their hour: the irradiance is moved back by the offset measured from the daylight edges (`-v` prints it); its ERA5-based files (declared offset -0.5) are aligned and left alone. With `--lat/--lon` elsewhere the file keeps its own solar day: each row meets the site's sun at the same solar time | `read_epw` -> `Weather` |
 | `--clear-sky` | flag | off | no weather file: synthesise an hourly clear-sky year (Ineichen-Perez model, pvlib formulation) for `--lat/--lon`; cloudless upper bound, typically 20-50 % above a TMY; exclusive with `--epw` | `clear_sky_weather(lat, lon, tz, TL, alt, w)` |
 | `--turbidity TL` | Linke turbidity | `3` | atmosphere for `--clear-sky`: 2 very clear mountain, 3 clear, 4-5 hazy / urban, 6-7 polluted | argument of `clear_sky_weather` |
 | `--altitude M` | metres | `0` | site elevation for `--clear-sky` (air pressure, model coefficients) | argument of `clear_sky_weather` |
 | `--lat DEG` `--lon DEG` | degrees, N and E positive | EPW header | location; required without `--epw` (sun hours, clear sky); overrides the EPW header | `lat`, `lon` |
 | `--tz H` | hours, E positive | EPW header, else `round(lon / 15)` | the clock of `--time`, `--from`, `--to` and `--hours`: standard time, no DST. An EPW keeps its own clock; the timestamps are moved into it, so the weather of an hour stays with the sun of that hour whatever `--tz` says | `tz` |
 | `--time TS` | `[YYYY-]MM-DDTHH:MM` | | evaluate one instant (year ignored; Feb 29 only with a leap EPW); DNI/DHI interpolated between the hours around it | `t0` |
-| `--from TS --to TS` | timestamps | | evaluate the range `[from, to)` in `--step` increments, the sun at the middle of each step | `t0`, `t1` |
+| `--from TS --to TS` | timestamps | | evaluate the range `[from, to)` in `--step` increments, the sun at the middle of each step (the last step of the range, or of a day's `--hours` window, may be shorter) | `t0`, `t1` |
 | `--step MIN` | minutes | `60` | step of `--from/--to` (DNI/DHI interpolated between the hour centres; 60-min steps on whole hours read the hours exactly) | `stepMin` |
 | `--hours HH:MM-HH:MM` | times of day, end up to `24:00` | whole day | with `--from/--to`: keep only the steps in `[start, end)` of every day, e.g. 1 Jun to 31 Aug 09:00 to 17:00 (an analysis period) | `dayFrom`, `dayTo` (minutes) |
 | (no time flags) | | | annual: one step per weather row at the mid-hour | `t0 = t1 = NAN` |
@@ -30,7 +30,7 @@ is given for in-process callers; the Python and TypeScript `run(..., args=[...])
 | `--north DEG` | degrees, counter-clockwise from +Y | `0` | model north (ladybug convention; 90 = west) | `north` |
 | `--offset M` | metres | `0` | sensors moved along their normal (Grasshopper uses 0.1) | `offset` |
 | `--out FILE[.npy]` | path | stdout | values: text (one line per element, `%.10g` columns) or NumPy float64 `[N x C]`; manifest at `FILE.json` | `Result` |
-| `--timeseries F.npy` | path | off | per-step values, float32 `[N x T]` (W/m2, or lux for illuminance) for the non-night steps; `F.npy.hoys.txt` lists the hours of year | `seriesPath` |
+| `--timeseries F.npy` | path | off | per-step values, float32 `[N x T]` (W/m2, or lux for illuminance) for the non-night steps; `F.npy.hoys.txt` lists the hours of year of the evaluated instants, in the `--tz` clock | `seriesPath` |
 | `--dump-bits F.npy` | path | off | validation: visibility bits uint32 `[N x words]`, direction order sky \| ground \| sun | `dumpBitsPath` |
 | `--dump-sky F` | path | off | validation (ladybug mode): the two `gendaymtx -A` blocks | `dumpSky` |
 | `--dump-sun F` | path | off | validation: per step hoy, date, NOAA and sun.c positions, DNI, DHI | `dumpSun` |

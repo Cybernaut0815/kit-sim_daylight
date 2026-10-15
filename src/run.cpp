@@ -86,9 +86,12 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   // One clock per run: the weather's. --tz is the clock of the user's timestamps; with weather they are moved into the
   // weather's clock (shift), so its rows stay paired with the sun of their own hour whatever --tz says.
   double lat = w ? w->lat : opt.lat, lon = w ? w->lon : opt.lon, tz = w ? w->tz : opt.tz;
-  const double shift = w && !std::isnan(opt.tz) ? opt.tz - w->tz : 0;
   if (!std::isnan(opt.lat)) lat = opt.lat;
   if (!std::isnan(opt.lon)) lon = opt.lon;
+  // A file read at another longitude (an upload, a distant station) keeps its rows on its own solar day: its clock moves
+  // with the longitude, so each row meets the site's sun at the same solar time. At the file's own place: its zone.
+  if (w) tz = w->tz + (lon - w->lon) / 15;
+  const double shift = w && !std::isnan(opt.tz) ? opt.tz - tz : 0;
   if (std::isnan(lat) || std::isnan(lon) || std::isnan(tz)) { err = "location unknown: give --epw or --lat --lon --tz"; return false; }
   const bool leap = w ? w->leap : false;
   if (opt.verbose && w && w->shiftH != 0) std::fprintf(stderr, "info: PVGIS weather: irradiance moved %.2f h later to meet its sun\n", w->shiftH);
@@ -190,7 +193,8 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   // ladybug emulation state (gendaymtx -A float accumulation over all rows, wea-rounded location/irradiance)
   std::vector<float> accDir(Pz, 0.f), accDif(3 * Pz, 0.f);
   std::vector<float> lbDif3g;                    // for --dump-sky: averaged RGB (ground row first), dif then dir
-  const double latW = round_fmt(lat, "%.2f"), lonWestW = round_fmt(-lon, "%.2f"), meridW = static_cast<double>(static_cast<int>(-tz * 15.0));
+  // ladybug writes the .wea with the file's own (integer-meridian) zone, as before the longitude-moved clock above
+  const double latW = round_fmt(lat, "%.2f"), lonWestW = round_fmt(-lon, "%.2f"), meridW = static_cast<double>(static_cast<int>(-(w ? w->tz : tz) * 15.0));
   std::vector<float> lbGroundDif(3, 0.f), lbGroundDir(3, 0.f);   // float accumulators of the ground row (gendaymtx row 0)
   double droppedDni = 0;
   std::vector<size_t> sunIdxOfStep(T, SIZE_MAX);

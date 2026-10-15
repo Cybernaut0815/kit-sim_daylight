@@ -241,6 +241,25 @@ int check_gpu(const char* testsDir) {
     o.cancel = &stop;
     e2.clear();
     CHECK(!run(meshes, nullptr, o, ra2, e2) && e2 == "cancelled");
+
+    // one clock per run, end to end. The same instant in another --tz (or no --tz) gives the same numbers; a site 15 deg
+    // east reading this weather pairs each row with the same solar time (12:00 UTC-5 there is 13:00 UTC-5 in Boston).
+    o.cancel = nullptr;
+    o.sceneKey.clear();
+    o.quantities = {Quantity::Irradiance};
+    Weather cs;
+    CHECK(clear_sky_weather(42.35, -71.07, -5, 3, 0, cs, e2));
+    Result h5, h4, hd, far, near13;
+    o.tz = -5; CHECK(parse_hoy("06-21T12:00", false, o.t0, e2)); CHECK(run(meshes, &cs, o, h5, e2));
+    o.tz = -4; CHECK(parse_hoy("06-21T13:00", false, o.t0, e2)); CHECK(run(meshes, &cs, o, h4, e2));
+    o.tz = NAN; CHECK(parse_hoy("06-21T12:00", false, o.t0, e2)); CHECK(run(meshes, &cs, o, hd, e2));
+    CHECK(!h5.values.empty() && h5.values == h4.values && h5.values == hd.values);
+    o.tz = -5; o.lon = -56.07; CHECK(run(meshes, &cs, o, far, e2));
+    o.lon = -71.07; CHECK(parse_hoy("06-21T13:00", false, o.t0, e2)); CHECK(run(meshes, &cs, o, near13, e2));
+    double worst = 0;
+    for (size_t i = 0; i < far.values.size() && i < near13.values.size(); ++i)
+      worst = std::max(worst, std::fabs(far.values[i] - near13.values[i]) / std::max(1.0, std::fabs(near13.values[i])));
+    CHECK(far.values.size() == near13.values.size() && worst < 2e-3);   // the sun differs only by one hour of declination
   }
   return failures;
 }

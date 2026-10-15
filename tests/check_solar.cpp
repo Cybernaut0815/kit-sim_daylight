@@ -162,7 +162,7 @@ int check_solar(const char*) {
   CHECK(make_steps(opt, &bos, st, err) && st.size() == 6);
   if (st.size() == 6) {
     // the sun at the middle of each step, the weather linear between the centres of the hour-ending rows
-    for (int k = 0; k < 6; ++k) CHECK(st[k].hour == 6.25 + 0.5 * k && st[k].hoy == 4110 + 0.5 * k && st[k].dt == 0.5 && st[k].month == 6 && st[k].day == 21 && st[k].jd == 172);
+    for (int k = 0; k < 6; ++k) CHECK(st[k].hour == 6.25 + 0.5 * k && st[k].hoy == 4110.25 + 0.5 * k && st[k].dt == 0.5 && st[k].month == 6 && st[k].day == 21 && st[k].jd == 172);
     const auto mix = [&](size_t r, double f) { return bos.dni[r] * (1 - f) + bos.dni[r + 1] * f; };
     CHECK(std::fabs(st[0].dni - mix(4109, 0.75)) < 1e-3 && std::fabs(st[1].dni - mix(4110, 0.25)) < 1e-3 && std::fabs(st[2].dni - mix(4110, 0.75)) < 1e-3);
   }
@@ -178,6 +178,8 @@ int check_solar(const char*) {
   CHECK(!make_steps(opt, &bos, st, err));
   opt.t1 = 20; opt.stepMin = 0;
   CHECK(!make_steps(opt, &bos, st, err));
+  opt.stepMin = 60; opt.t0 = 4110; opt.t1 = 4110 + 1 / 3.0;   // 06:00-06:20: one step of 20 min, evaluated at 06:10
+  CHECK(make_steps(opt, &bos, st, err) && st.size() == 1 && std::fabs(st[0].dt - 1 / 3.0) < 1e-12 && std::fabs(st[0].hour - (6 + 1 / 6.0)) < 1e-12);
   // ---- steps: --hours, the same hours of every day (analysis period)
   opt.stepMin = 60;
   CHECK(parse_hoy("06-01T08:00", false, opt.t0, err) && parse_hoy("06-03T18:00", false, opt.t1, err));
@@ -190,6 +192,9 @@ int check_solar(const char*) {
   }
   opt.dayFrom = 120; opt.dayTo = 180;   // 02:00-03:00 misses 06-01 08:00 .. 06-03 18:00 except days 2 and 3
   CHECK(make_steps(opt, &bos, st, err) && st.size() == 2 && st[0].day == 2 && st[0].hour == 2.5);
+  opt.dayFrom = 480; opt.dayTo = 1050;   // 08:00-17:30: each day's last step lasts half an hour, evaluated at 17:15
+  CHECK(make_steps(opt, &bos, st, err) && st.size() == 30 && st[9].dt == 0.5 && st[9].hour == 17.25 && st[8].dt == 1);
+  opt.dayFrom = 120; opt.dayTo = 180;
   opt.t1 = opt.t0 + 10;
   CHECK(!make_steps(opt, &bos, st, err));   // no step inside the window
   opt.dayFrom = 0; opt.dayTo = 1440;
@@ -227,27 +232,29 @@ int check_solar(const char*) {
   {   // PVGIS rows written an hour ahead of their hour are moved back; other files are left alone
     const double pi = std::acos(-1.0);
     const auto ghi = [&](double t) { return std::max(0.0, 800 * std::cos(pi * (t - 12) / 12)); };   // solar noon 12:00 at lon 15, tz 1
-    const auto epw = [&](bool pvgisComment, int early) {
+    const auto epw = [&](const char* offset, int early, double afternoon = 1) {   // offset: the PVGIS comment's value, or none
       std::string s = "LOCATION,unknown,-,unknown,unknown,unknown,45.0,15.0,1.0,100\nDESIGN CONDITIONS,0\nTYPICAL/EXTREME PERIODS,0\n"
                       "GROUND TEMPERATURES,0\nHOLIDAYS/DAYLIGHT SAVINGS,No,0,0,0\nCOMMENTS 1,test\n";
-      s += pvgisComment ? "COMMENTS 2,Irradiance Time Offset (h):-0.83\n" : "COMMENTS 2,test\n";
+      s += offset ? std::string("COMMENTS 2,Irradiance Time Offset (h):") + offset + "\n" : std::string("COMMENTS 2,test\n");
       s += "DATA PERIODS,1,1,Data,Sunday,1/1,12/31\n";
       char buf[160];
       for (int r = 0; r < 8760; ++r) {
-        const double g = ghi(r % 24 + 0.5 + early);
+        const double t = r % 24 + 0.5 + early, g = ghi(t) * (t > 12 ? afternoon : 1);
         std::snprintf(buf, sizeof buf, "2017,1,1,1,0,?,0,0,0,0,0,0,0,%.3f,%.3f,%.3f\n", g, 0.7 * g, 0.3 * g);
         s += buf;
       }
       return s;
     };
-    std::istringstream early(epw(true, 1)), aligned(epw(true, 0)), station(epw(false, 1));
-    Weather a, b, c;
+    std::istringstream early(epw("-0.83", 1)), aligned(epw("-0.83", 0)), station(epw(nullptr, 1)), lopsided(epw("-0.83", 1, 0.3)), era5(epw("-0.5", 1));
+    Weather a, b, c, d, e;
     CHECK(read_epw(early, "pvgis-early.epw", a, err) && std::fabs(a.shiftH - 1) < 0.05);
     double worst = 0;
     for (size_t r = 0; r < a.dni.size(); ++r) worst = std::max(worst, std::fabs(a.dni[r] - 0.7 * ghi(r % 24 + 0.5)));
     CHECK(worst < 1);
     CHECK(read_epw(aligned, "pvgis.epw", b, err) && b.shiftH == 0);
     CHECK(read_epw(station, "station.epw", c, err) && c.shiftH == 0 && std::fabs(c.dni[12] - 0.7 * ghi(13.5)) < 0.01);
+    CHECK(read_epw(lopsided, "pvgis-cloudy-afternoons.epw", d, err) && std::fabs(d.shiftH - 1) < 0.05);   // clouds do not move the edges
+    CHECK(read_epw(era5, "pvgis-era5.epw", e, err) && e.shiftH == 0);   // ERA5 files are aligned
   }
   {
     const auto run = [](std::vector<const char*> v, cli::Args& a, std::string& e) {

@@ -35,8 +35,9 @@ struct Weather {
 
 // One evaluation step. month/day/hour: when the sun is evaluated, in the weather's clock (annual: row%24 + 0.5; a
 // range step: its middle; --time: the instant). jd: that day of year as gendaymtx computes it (Feb 29 -> 60, later days
-// +1 in leap years). dt: hours represented. hoy: hour of year of the step start in the user's clock (--tz; annual: the
+// +1 in leap years). dt: hours represented. hoy: hour of year of the evaluated instant in the user's clock (--tz; annual: the
 // row midpoint). dni/dhi: W/m2 at the evaluation time, linear between the centres of the hour-ending rows (0 without weather).
+// A range step lasts up to the next one, the end of the range or the end of the day's --hours window (dt).
 struct Step { int month = 1, day = 1, jd = 1; double hour = 0, hoy = 0, dt = 1; float dni = 0, dhi = 0; };
 
 enum class Mode { Physical, Ladybug };
