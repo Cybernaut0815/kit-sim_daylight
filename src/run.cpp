@@ -83,16 +83,19 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
     int m = static_cast<int>(std::lround(std::sqrt(static_cast<double>(K))));
     if (m * m != K) { err = "--patch-samples must be a square number (1, 4, 9, 16, ...)"; return false; }
   }
+  // One clock per run: the weather's. --tz is the clock of the user's timestamps; with weather they are moved into the
+  // weather's clock (shift), so its rows stay paired with the sun of their own hour whatever --tz says.
   double lat = w ? w->lat : opt.lat, lon = w ? w->lon : opt.lon, tz = w ? w->tz : opt.tz;
+  const double shift = w && !std::isnan(opt.tz) ? opt.tz - w->tz : 0;
   if (!std::isnan(opt.lat)) lat = opt.lat;
   if (!std::isnan(opt.lon)) lon = opt.lon;
-  if (!std::isnan(opt.tz)) tz = opt.tz;
   if (std::isnan(lat) || std::isnan(lon) || std::isnan(tz)) { err = "location unknown: give --epw or --lat --lon --tz"; return false; }
   const bool leap = w ? w->leap : false;
+  if (opt.verbose && w && w->shiftH != 0) std::fprintf(stderr, "info: PVGIS weather: irradiance moved %.2f h later to meet its sun\n", w->shiftH);
 
   // ---- steps ---------------------------------------------------------------------------------------------------
   std::vector<Step> steps;
-  if (!make_steps(opt, w, steps, err)) return false;
+  if (!make_steps(opt, w, steps, err, shift)) return false;
   if (steps.empty()) { err = "no timesteps selected"; return false; }
   const size_t T = steps.size();
   double durationHours = 0;

@@ -23,17 +23,20 @@ struct Mesh {
   size_t numPoints() const { return points.size() / 3; }
 };
 
-// Hourly weather (EPW). dni/dhi: one value per row (8760 or 8784), W/m2 averaged over the hour ending at the row.
+// Hourly weather (EPW). dni/dhi: one value per row (8760 or 8784), W/m2 averaged over the hour ending at the row, in
+// the file's own clock (tz). Timestamps of a run (--time / --from / --to, in --tz) are converted into this clock.
 struct Weather {
   double lat = 0, lon = 0, tz = 0;   // degrees N+, degrees E+, hours E+
   bool leap = false;
   std::vector<float> dni, dhi;
   int missing = 0;                             // rows with missing (>= 9999) radiation, treated as 0
+  double shiftH = 0;                           // hours the irradiance was moved later to meet its sun (PVGIS files)
 };
 
-// One evaluation step. hour: local standard decimal hour at which the sun is evaluated (EPW-driven: row%24 + 0.5).
-// jd: day of year as gendaymtx computes it (Feb 29 -> 60, later days +1 in leap years). dt: hours represented.
-// hoy: hour of year (0 = Jan 1 00:00). dni/dhi: W/m2 of the EPW row containing the step (0 without weather).
+// One evaluation step. month/day/hour: when the sun is evaluated, in the weather's clock (annual: row%24 + 0.5; a
+// range step: its middle; --time: the instant). jd: that day of year as gendaymtx computes it (Feb 29 -> 60, later days
+// +1 in leap years). dt: hours represented. hoy: hour of year of the step start in the user's clock (--tz; annual: the
+// row midpoint). dni/dhi: W/m2 at the evaluation time, linear between the centres of the hour-ending rows (0 without weather).
 struct Step { int month = 1, day = 1, jd = 1; double hour = 0, hoy = 0, dt = 1; float dni = 0, dhi = 0; };
 
 enum class Mode { Physical, Ladybug };

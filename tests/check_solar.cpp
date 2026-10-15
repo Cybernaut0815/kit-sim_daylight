@@ -2,6 +2,7 @@
 // Checks for solar.cpp: NOAA sun vs ladybug Sunpath goldens, EPW reader, steps, timestamp parsing.
 #include "cli.h"
 #include "internal.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -160,13 +161,16 @@ int check_solar(const char*) {
   opt.t1 = 4113; opt.stepMin = 30;
   CHECK(make_steps(opt, &bos, st, err) && st.size() == 6);
   if (st.size() == 6) {
-    for (int k = 0; k < 6; ++k) CHECK(st[k].hour == 6 + 0.5 * k && st[k].hoy == 4110 + 0.5 * k && st[k].dt == 0.5 && st[k].month == 6 && st[k].day == 21 && st[k].jd == 172);
-    CHECK(st[0].dni == 286 && st[0].dhi == 144 && st[1].dni == 286 && st[2].dni == bos.dni[4111]);
+    // the sun at the middle of each step, the weather linear between the centres of the hour-ending rows
+    for (int k = 0; k < 6; ++k) CHECK(st[k].hour == 6.25 + 0.5 * k && st[k].hoy == 4110 + 0.5 * k && st[k].dt == 0.5 && st[k].month == 6 && st[k].day == 21 && st[k].jd == 172);
+    const auto mix = [&](size_t r, double f) { return bos.dni[r] * (1 - f) + bos.dni[r + 1] * f; };
+    CHECK(std::fabs(st[0].dni - mix(4109, 0.75)) < 1e-3 && std::fabs(st[1].dni - mix(4110, 0.25)) < 1e-3 && std::fabs(st[2].dni - mix(4110, 0.75)) < 1e-3);
   }
   opt.stepMin = 10; opt.t1 = 4111;
-  CHECK(make_steps(opt, &bos, st, err) && st.size() == 6 && std::fabs(st[5].hour - (6 + 50 / 60.0)) < 1e-9);   // no fp extra step at 7:00
+  CHECK(make_steps(opt, &bos, st, err) && st.size() == 6 && std::fabs(st[5].hour - (6 + 55 / 60.0)) < 1e-9);   // no fp extra step at 7:00
   opt.t1 = NAN; opt.stepMin = 60;
   CHECK(make_steps(opt, &bos, st, err) && st.size() == 1 && st[0].hour == 6 && st[0].dt == 1);   // --time: one exact step
+  CHECK(st.size() == 1 && std::fabs(st[0].dni - (bos.dni[4109] + bos.dni[4110]) / 2) < 1e-3);   // 06:00: between the hours ending 06:00 and 07:00
   CHECK(make_steps(opt, nullptr, st, err) && st.size() == 1 && st[0].dni == 0 && st[0].dhi == 0);   // no weather: zero irradiance
   opt.t0 = 8759.5;
   CHECK(make_steps(opt, &bos, st, err) && st.size() == 1 && st[0].hour == 23.5);   // t1 clamped to the end of year
@@ -181,11 +185,11 @@ int check_solar(const char*) {
   opt.dayFrom = 480; opt.dayTo = 1080;
   CHECK(make_steps(opt, &bos, st, err) && st.size() == 30);
   if (st.size() == 30) {
-    CHECK(st[0].day == 1 && st[0].hour == 8 && st[9].hour == 17 && st[10].day == 2 && st[10].hour == 8 && st[29].day == 3 && st[29].hour == 17);
+    CHECK(st[0].day == 1 && st[0].hour == 8.5 && st[9].hour == 17.5 && st[10].day == 2 && st[10].hour == 8.5 && st[29].day == 3 && st[29].hour == 17.5);
     CHECK(st[0].dt == 1 && st[10].hoy == st[0].hoy + 24);
   }
   opt.dayFrom = 120; opt.dayTo = 180;   // 02:00-03:00 misses 06-01 08:00 .. 06-03 18:00 except days 2 and 3
-  CHECK(make_steps(opt, &bos, st, err) && st.size() == 2 && st[0].day == 2 && st[0].hour == 2);
+  CHECK(make_steps(opt, &bos, st, err) && st.size() == 2 && st[0].day == 2 && st[0].hour == 2.5);
   opt.t1 = opt.t0 + 10;
   CHECK(!make_steps(opt, &bos, st, err));   // no step inside the window
   opt.dayFrom = 0; opt.dayTo = 1440;
@@ -195,6 +199,56 @@ int check_solar(const char*) {
   opt.dayTo = 60;   // 00:00-01:00 of every day, the 00:00 steps included: 4 (from 00:20) + 3 x 6 + 2 (to 00:20)
   CHECK(make_steps(opt, &bos, st, err) && st.size() == 24);
   opt.dayTo = 1440; opt.stepMin = 60;
+  {   // a full year of 60-min steps is the annual run: the same suns and the same rows
+    Options yr, an;
+    yr.t0 = 0; yr.t1 = 8760;
+    std::vector<Step> a, b;
+    bool same = make_steps(yr, &bos, a, err) && make_steps(an, &bos, b, err) && a.size() == 8760 && b.size() == 8760;
+    for (size_t i = 0; same && i < a.size(); ++i)
+      same = a[i].month == b[i].month && a[i].day == b[i].day && a[i].hour == b[i].hour && a[i].dni == b[i].dni && a[i].dhi == b[i].dhi;
+    CHECK(same);
+  }
+  {   // one clock per run: timestamps in another zone are moved into the weather's clock (Boston EPW: UTC-5)
+    Options o5, o4;
+    std::vector<Step> a, b;
+    o5.t0 = 4116; o4.t0 = 4117;   // 06-21 12:00 in UTC-5 is 13:00 in UTC-4
+    CHECK(make_steps(o5, &bos, a, err, 0) && make_steps(o4, &bos, b, err, 1) && a.size() == 1 && b.size() == 1);
+    CHECK(a.size() == 1 && b.size() == 1 && a[0].hour == b[0].hour && a[0].day == b[0].day && a[0].dni == b[0].dni && a[0].dhi == b[0].dhi && b[0].hoy == 4117);
+    CHECK(parse_hoy("06-01T09:00", false, o5.t0, err) && parse_hoy("06-03T14:00", false, o5.t1, err));
+    CHECK(parse_hoy("06-01T10:00", false, o4.t0, err) && parse_hoy("06-03T15:00", false, o4.t1, err));
+    o5.dayFrom = 540; o5.dayTo = 840; o4.dayFrom = 600; o4.dayTo = 900;   // 09:00-14:00 every day in UTC-5 = 10:00-15:00 in UTC-4
+    bool same = make_steps(o5, &bos, a, err, 0) && make_steps(o4, &bos, b, err, 1) && a.size() == 15 && a.size() == b.size();
+    for (size_t i = 0; same && i < a.size(); ++i) same = a[i].hour == b[i].hour && a[i].day == b[i].day && a[i].dni == b[i].dni && b[i].hoy == a[i].hoy + 1;
+    CHECK(same);
+    Options jan;
+    jan.t0 = 0.5;   // Jan 1 00:30 in UTC-4 is Dec 31 23:30 in UTC-5: wraps into the same weather year
+    CHECK(make_steps(jan, &bos, a, err, 1) && a.size() == 1 && a[0].month == 12 && a[0].day == 31 && a[0].hour == 23.5 && a[0].dni == bos.dni[8759]);
+  }
+  {   // PVGIS rows written an hour ahead of their hour are moved back; other files are left alone
+    const double pi = std::acos(-1.0);
+    const auto ghi = [&](double t) { return std::max(0.0, 800 * std::cos(pi * (t - 12) / 12)); };   // solar noon 12:00 at lon 15, tz 1
+    const auto epw = [&](bool pvgisComment, int early) {
+      std::string s = "LOCATION,unknown,-,unknown,unknown,unknown,45.0,15.0,1.0,100\nDESIGN CONDITIONS,0\nTYPICAL/EXTREME PERIODS,0\n"
+                      "GROUND TEMPERATURES,0\nHOLIDAYS/DAYLIGHT SAVINGS,No,0,0,0\nCOMMENTS 1,test\n";
+      s += pvgisComment ? "COMMENTS 2,Irradiance Time Offset (h):-0.83\n" : "COMMENTS 2,test\n";
+      s += "DATA PERIODS,1,1,Data,Sunday,1/1,12/31\n";
+      char buf[160];
+      for (int r = 0; r < 8760; ++r) {
+        const double g = ghi(r % 24 + 0.5 + early);
+        std::snprintf(buf, sizeof buf, "2017,1,1,1,0,?,0,0,0,0,0,0,0,%.3f,%.3f,%.3f\n", g, 0.7 * g, 0.3 * g);
+        s += buf;
+      }
+      return s;
+    };
+    std::istringstream early(epw(true, 1)), aligned(epw(true, 0)), station(epw(false, 1));
+    Weather a, b, c;
+    CHECK(read_epw(early, "pvgis-early.epw", a, err) && std::fabs(a.shiftH - 1) < 0.05);
+    double worst = 0;
+    for (size_t r = 0; r < a.dni.size(); ++r) worst = std::max(worst, std::fabs(a.dni[r] - 0.7 * ghi(r % 24 + 0.5)));
+    CHECK(worst < 1);
+    CHECK(read_epw(aligned, "pvgis.epw", b, err) && b.shiftH == 0);
+    CHECK(read_epw(station, "station.epw", c, err) && c.shiftH == 0 && std::fabs(c.dni[12] - 0.7 * ghi(13.5)) < 0.01);
+  }
   {
     const auto run = [](std::vector<const char*> v, cli::Args& a, std::string& e) {
       v.insert(v.begin(), "daylight");
@@ -215,6 +269,9 @@ int check_solar(const char*) {
     }
     cli::Args d;
     CHECK(run({"--lat", "42", "--lon", "-71", "--time", "06-01T08:00", "--hours", "08:00-18:00"}, d, err) == 1 && err == "--hours needs --from/--to");
+    cli::Args e, g;   // the default zone: an EPW's own, else round(lon / 15)
+    CHECK(run({"--lat", "42", "--lon", "-71", "--epw", "C:/DAYSIM/wea/USA_MA_Boston-City.WSO_TMY.epw"}, e, err) == 0 && std::isnan(e.opt.tz));
+    CHECK(run({"--lat", "42", "--lon", "-71", "--time", "06-01T08:00"}, g, err) == 0 && g.opt.tz == -5);
   }
 
   // ---- parse_hoy / hoy_to_date round trips

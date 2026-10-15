@@ -39,8 +39,10 @@ struct Sun { double alt = 0, azi = 0; bool up = false; float3 vec{0.f, 0.f, 0.f}
 // day fraction, NOAA refraction added to altitude, azimuth from the unrefracted zenith, up = refracted alt >= 0).
 Sun sun_noaa(double lat, double lon, double tz, int month, int day, double hourFrac, bool leap);
 // Evaluation steps from Options (+ Weather). EPW-driven annual: one step per row at row%24 + 0.5 h, dt 1.
-// User range / time: exact stamps, dt = stepMin/60, dni/dhi of the containing EPW row (0 without weather).
-bool make_steps(const Options& opt, const Weather* w, std::vector<Step>& out, std::string& err);
+// User range / time: stamps and the --hours window in the user's clock, dt = stepMin/60; the sun is evaluated at the
+// instant (--time) or the step middle (ranges), moved into the weather's clock by shift = user tz - weather tz (hours),
+// with dni/dhi interpolated there (0 without weather).
+bool make_steps(const Options& opt, const Weather* w, std::vector<Step>& out, std::string& err, double shift = 0);
 // Parse "[YYYY-]MM-DDTHH:MM" to hour of year (leap-aware). Year ignored.
 bool parse_hoy(const std::string& s, bool leap, double& hoy, std::string& err);
 void hoy_to_date(double hoy, bool leap, int& month, int& day, double& hour);

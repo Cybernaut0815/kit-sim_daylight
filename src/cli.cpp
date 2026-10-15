@@ -23,10 +23,10 @@ const char* const kUsage =
     "  --quantity Q[,Q...]      radiation|direct|diffuse|irradiance|illuminance|sunhours (default radiation)\n"
     "  --sides front|back|both  receiving side(s) of each element (default front)\n"
     "  --cull-backfaces         occluders block only from their front side (default two-sided)\n"
-    "  --epw FILE               weather + location; --lat --lon --tz override or replace it (sunhours only)\n"
+    "  --epw FILE               weather + location; --lat --lon override its location (or replace it: sunhours)\n"
     "  --clear-sky              synthetic cloudless weather (Ineichen) at --lat --lon instead of --epw (upper bound)\n"
     "  --turbidity TL           Linke turbidity for --clear-sky (default 3)   --altitude M  site altitude (default 0)\n"
-    "  --tz H                   defaults to round(lon / 15) when --lat --lon are given without --tz\n"
+    "  --tz H                   clock of the timestamps, standard time (default: the EPW's zone, else round(lon / 15))\n"
     "  --time [YYYY-]MM-DDTHH:MM | --from TS --to TS [--step MIN]   default: annual over the EPW rows\n"
     "  --hours HH:MM-HH:MM      with --from/--to: only these hours of every day (analysis period)\n"
     "  --sky-density 1|2|4  --patch-samples K  --ground RHO  --north DEG  --offset M  --no-self-occlude\n"
@@ -113,7 +113,8 @@ int parse(int argc, char** argv, Args& a, std::string& err) {
 int prepare(Args& a, Weather& weather, bool& haveWeather, std::string& err) {
   if (a.clearSky && !a.epw.empty()) { err = "--clear-sky and --epw are exclusive"; return 1; }
   if (a.clearSky && (std::isnan(a.opt.lat) || std::isnan(a.opt.lon))) { err = "--clear-sky needs --lat and --lon"; return 1; }
-  if (!std::isnan(a.opt.lat) && !std::isnan(a.opt.lon) && std::isnan(a.opt.tz)) {
+  // Without --tz an EPW's own zone applies (run() reads it); only runs without an EPW guess it from the longitude.
+  if (!std::isnan(a.opt.lat) && !std::isnan(a.opt.lon) && std::isnan(a.opt.tz) && a.epw.empty() && !haveWeather) {
     a.opt.tz = std::round(a.opt.lon / 15);
     if (a.opt.verbose) std::fprintf(stderr, "info: tz defaulted to %g\n", a.opt.tz);
   }

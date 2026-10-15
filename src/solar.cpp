@@ -23,6 +23,39 @@ int days_in_month(int m, bool leap) {
 constexpr int leaps_before(int y) { --y; return y / 4 - y / 100 + y / 400; }
 constexpr int days_from_1900(int year) { return (year - 1900) * 365 + leaps_before(year) - leaps_before(1900); }
 static_assert(days_from_1900(2017) == 42734 && days_from_1900(2016) == 42368, "ladybug anchors");
+
+// Linear between the centres of the hour-ending rows of a cyclic year (row r = the mean over (r, r+1], centred at
+// r + 0.5): exactly row r at r + 0.5. t in hours of the series' year; the series wraps at the year ends.
+float lerp_rows(const std::vector<float>& v, double t) {
+  const long n = static_cast<long>(v.size());
+  const double x = t - 0.5, f = x - std::floor(x);
+  const long a = ((static_cast<long>(std::floor(x)) % n) + n) % n, b = (a + 1) % n;
+  return static_cast<float>(v[a] * (1 - f) + v[b] * f);
+}
+
+// PVGIS writes the hourly irradiance of many sites up to an hour before the hour it belongs to (all its EPWs with a
+// header zone of +1 or less, checked 2026-10; its SARAH and ERA5 series also differ by the satellite scan time). Measure
+// the offset as the GHI-weighted circular mean hour of the rows against the expected solar noon (station EPWs: within
+// 0.15 h) and move DNI / DHI later by it when it is clearly off.
+void pvgis_align(Weather& w, const std::vector<float>& ghi) {
+  double sx = 0, sy = 0;
+  for (size_t r = 0; r < ghi.size(); ++r) {
+    const double a = 2 * kPi * (static_cast<double>(r % 24) + 0.5) / 24;
+    sx += ghi[r] * std::cos(a);
+    sy += ghi[r] * std::sin(a);
+  }
+  if (sx == 0 && sy == 0) return;
+  const double mean = std::atan2(sy, sx) * 24 / (2 * kPi), noon = 12 - (w.lon / 15 - w.tz);
+  const double d = pymod(mean - noon + 12, 24) - 12;   // hours the data runs ahead of its labels: (-12, 12]
+  if (std::fabs(d) <= 0.3) return;
+  const std::vector<float> dni = w.dni, dhi = w.dhi;
+  for (size_t r = 0; r < dni.size(); ++r) {
+    const double t = static_cast<double>(r) + 0.5 + d;
+    w.dni[r] = lerp_rows(dni, t);
+    w.dhi[r] = lerp_rows(dhi, t);
+  }
+  w.shiftH = -d;
+}
 }  // namespace
 
 Sun sun_noaa(double lat, double lon, double tz, int month, int day, double hourFrac, bool leap) {
@@ -80,7 +113,7 @@ bool read_epw(std::istream& f, const std::string& path, Weather& w, std::string&
     std::stringstream ss(l);
     for (std::string c; std::getline(ss, c, ',');) cols.push_back(c);
   };
-  bool hdrLeap = false;
+  bool hdrLeap = false, pvgis = false;
   for (int i = 0; i < 8; ++i) {
     if (!std::getline(f, line)) { err = "EPW header truncated: " + path; return false; }
     split(line);
@@ -89,8 +122,10 @@ bool read_epw(std::istream& f, const std::string& path, Weather& w, std::string&
       w.lat = std::atof(cols[6].c_str()); w.lon = std::atof(cols[7].c_str()); w.tz = std::atof(cols[8].c_str());
     }
     if (i == 4 && cols.size() > 1 && cols[1] == "Yes") hdrLeap = true;
+    if (line.find("Irradiance Time Offset") != std::string::npos) pvgis = true;   // a comment only PVGIS writes
   }
-  w.dni.clear(); w.dhi.clear(); w.missing = 0;
+  w.dni.clear(); w.dhi.clear(); w.missing = 0; w.shiftH = 0;
+  std::vector<float> ghi;
   while (std::getline(f, line)) {
     if (line.find_first_not_of(" \t\r") == std::string::npos) continue;
     split(line);
@@ -98,6 +133,7 @@ bool read_epw(std::istream& f, const std::string& path, Weather& w, std::string&
     double dni = std::atof(cols[14].c_str()), dhi = std::atof(cols[15].c_str());
     if (dni >= 9999 || dhi >= 9999) { ++w.missing; if (dni >= 9999) dni = 0; if (dhi >= 9999) dhi = 0; }
     w.dni.push_back((float)dni); w.dhi.push_back((float)dhi);
+    if (pvgis) { const double g = std::atof(cols[13].c_str()); ghi.push_back(g < 9999 ? (float)g : 0.f); }
   }
   size_t n = w.dni.size();
   w.leap = hdrLeap || n == 8784;
@@ -106,6 +142,7 @@ bool read_epw(std::istream& f, const std::string& path, Weather& w, std::string&
     err = "EPW: " + std::to_string(n) + " data rows, expected " + (w.leap ? "8784" : "8760") + ": " + path;
     return false;
   }
+  if (pvgis) pvgis_align(w, ghi);
   return true;
 }
 
@@ -168,7 +205,7 @@ bool parse_hoy(const std::string& s, bool leap, double& hoy, std::string& err) {
   return true;
 }
 
-bool make_steps(const Options& opt, const Weather* w, std::vector<Step>& out, std::string& err) {
+bool make_steps(const Options& opt, const Weather* w, std::vector<Step>& out, std::string& err, double shift) {
   out.clear();
   bool leap = w && w->leap;
   if (std::isnan(opt.t0)) {   // annual: one step per EPW row at the row midpoint
@@ -182,21 +219,24 @@ bool make_steps(const Options& opt, const Weather* w, std::vector<Step>& out, st
     return true;
   }
   if (opt.stepMin <= 0) { err = "step must be a positive number of minutes"; return false; }
+  const bool instant = std::isnan(opt.t1);
   double step = opt.stepMin / 60.0, nh = leap ? 8784 : 8760;
-  double t1 = std::isnan(opt.t1) ? opt.t0 + step : opt.t1;
+  double t1 = instant ? opt.t0 + step : opt.t1;
   if (t1 > nh) t1 = nh;
   if (opt.t0 < 0 || opt.t0 >= nh || t1 <= opt.t0) { err = "time range must satisfy 0 <= from < to <= end of year"; return false; }
   for (int k = 0;; ++k) {
-    double hoy = opt.t0 + k * step;
+    double hoy = opt.t0 + k * step;   // step start, the user's clock
     if (hoy >= t1 - 1e-9) break;
     double hod = (hoy - 24 * std::floor(hoy / 24)) * 60;   // minutes into the day: the --hours window
     if (hod >= 1440 - 1e-6) hod -= 1440;                    // a midnight step that lands at 24n - eps (step 10 min)
     if (hod < opt.dayFrom - 1e-6 || hod >= opt.dayTo - 1e-6) continue;
+    // evaluated at the instant (--time) or the middle of the step, in the weather's clock (wrapping at the year ends)
+    double at = (instant ? hoy : hoy + step / 2) - shift;
+    at -= nh * std::floor(at / nh);
     Step s;
-    s.hoy = hoy; s.jd = (int)(hoy / 24) + 1; s.dt = step;
-    hoy_to_date(hoy, leap, s.month, s.day, s.hour);
-    size_t r = (size_t)hoy;   // ponytail: containing EPW row, no sub-hourly interpolation
-    if (w && r < w->dni.size()) { s.dni = w->dni[r]; s.dhi = w->dhi[r]; }
+    s.hoy = hoy; s.jd = (int)(at / 24) + 1; s.dt = step;
+    hoy_to_date(at, leap, s.month, s.day, s.hour);
+    if (w && !w->dni.empty()) { s.dni = lerp_rows(w->dni, at); s.dhi = lerp_rows(w->dhi, at); }
     out.push_back(s);
   }
   if (out.empty()) { err = "no step falls inside the --hours window"; return false; }
