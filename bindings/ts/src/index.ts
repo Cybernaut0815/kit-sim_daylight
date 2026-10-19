@@ -245,11 +245,15 @@ export interface RemoteJob {
   status?: number; // state error: the HTTP status POST /run would have answered (400 usage, 500 runtime)
 }
 
+/** Mesh ids this process has put on each server: a job names them by id alone; any other is put first. */
+const uploaded = new Map<string, Set<string>>();
+
 /**
  * Browser or Node: runs the core on a `daylight_server` as a queued job, so several users share the GPU. Meshes travel
- * by id (`ObjMesh.id`; a UUID is minted here when absent): `POST <url>/jobs` names them, and when the server answers
- * 404 `{missing}` the `.dmesh` bytes go up once via `PUT <url>/mesh/<id>?name=<stem>` before one retry, so a re-run
- * with other settings sends no geometry. The job is then long-polled (`GET /jobs/<id>?wait=25`); `onStatus` sees every
+ * by id (`ObjMesh.id`; a UUID is minted here when absent): `POST <url>/jobs` names them. A mesh this process has not
+ * sent to that server yet goes up first, once, via `PUT <url>/mesh/<id>?name=<stem>`, so a re-run with other settings
+ * sends no geometry; when the server answers 404 `{missing}` anyway (restarted, or it evicted the mesh) those go up
+ * again before one retry. The job is then long-polled (`GET /jobs/<id>?wait=25`); `onStatus` sees every
  * queued / running state. Aborting `signal` cancels the job on the server (`DELETE /jobs/<id>`). `epw` is a Blob
  * (uploaded) or `{ url }` (the server fetches it through its allowlisted proxy cache). `args` are CLI flags verbatim
  * (no files). `clientId` (header `X-Client-Id`) identifies this client for the per-client job limit. Rejects with the
@@ -269,6 +273,14 @@ export async function runRemote(
   const meshes = [...input.sensors, ...(input.context ?? [])];
   for (const m of meshes) m.id ??= crypto.randomUUID();
   const stems = dmeshStems(meshes.map((m) => m.name));
+  const sent = uploaded.get(base) ?? uploaded.set(base, new Set()).get(base)!;
+  const put = (ids: string[]) => Promise.all([...new Set(ids)].map(async (id) => {
+    const k = meshes.findIndex((m) => m.id === id);
+    if (k < 0) throw new Error(`${base}/jobs asked for an unknown mesh id ${id}`);
+    const res = await req(`/mesh/${encodeURIComponent(id)}?name=${encodeURIComponent(stems[k])}`, { method: 'PUT', body: toDmesh(meshes[k]) });
+    if (!res.ok) throw new Error(`PUT ${base}/mesh/${id} failed (${res.status}): ${(await res.text()).trim()}`);
+    sent.add(id);
+  }));
   const body = () => {
     const fd = new FormData();
     for (const m of input.sensors) fd.append('sensors', m.id!);
@@ -278,15 +290,12 @@ export async function runRemote(
     for (const a of input.args ?? []) fd.append('args', a);
     return fd;
   };
+  await put(meshes.map((m) => m.id!).filter((id) => !sent.has(id))); // new meshes first: no 404 round trip
   let res = await req('/jobs', { method: 'POST', body: body() });
-  if (res.status === 404) {
+  if (res.status === 404) { // the server lost some (restart, eviction): put them again, retry once
     const { missing } = (await res.json()) as { missing: string[] };
-    await Promise.all(missing.map(async (id) => {
-      const k = meshes.findIndex((m) => m.id === id);
-      if (k < 0) throw new Error(`${base}/jobs asked for an unknown mesh id ${id}`);
-      const put = await req(`/mesh/${encodeURIComponent(id)}?name=${encodeURIComponent(stems[k])}`, { method: 'PUT', body: toDmesh(meshes[k]) });
-      if (!put.ok) throw new Error(`PUT ${base}/mesh/${id} failed (${put.status}): ${(await put.text()).trim()}`);
-    }));
+    for (const id of missing) sent.delete(id);
+    await put(missing);
     res = await req('/jobs', { method: 'POST', body: body() });
   }
   if (!res.ok) throw new Error(`${base}/jobs failed (${res.status}): ${(await res.text()).trim()}`);
