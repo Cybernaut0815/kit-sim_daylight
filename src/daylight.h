@@ -18,6 +18,7 @@ struct Mesh {
   std::vector<double> points;         // xyz interleaved
   std::vector<int> counts;            // vertices per face (faceVertexCounts)
   std::vector<int> indices;           // faceVertexIndices, right-handed winding (normals derived from geometry)
+  std::vector<uint16_t> slot;         // optics slot per face (numFaces() values); empty = every face slot 0
   bool sensor = true;                 // false = context: blocks rays only
   size_t numFaces() const { return counts.size(); }
   size_t numPoints() const { return points.size() / 3; }
@@ -83,8 +84,10 @@ struct Result {
 // OBJ contract: world metres, Z-up, right-handed winding; one o/g group per mesh; 1-based global indices (v, f only).
 bool read_obj(const std::string& path, std::vector<Mesh>& out, std::string& err);
 // .dmesh contract: one mesh per file (name = file stem), little-endian, no padding after the 32-byte header:
-//   char[4] "DLM1" | uint32 0 | uint64 n_points | uint64 n_faces | uint64 n_indices |
+//   char[4] "DLM1" | uint32 flags | uint64 n_points | uint64 n_faces | uint64 n_indices |
 //   float64 xyz[3*n_points] (metres, Z-up) | int32 counts[n_faces] (>= 3, right-handed) | int32 indices[n_indices] (0-based)
+//   [| uint16 slot[n_faces] (Mesh::slot) when flags bit 0 is set]. Any other flag bit, or a truncated slot block, is an
+//   error; bytes after the last array are ignored. OBJ / USD input is geometry only (every face slot 0).
 bool read_dmesh(const std::string& path, std::vector<Mesh>& out, std::string& err);
 // The same from memory (an upload); name is the mesh name (what the file stem is for the path overload).
 bool read_dmesh(const char* data, size_t size, const std::string& name, std::vector<Mesh>& out, std::string& err);

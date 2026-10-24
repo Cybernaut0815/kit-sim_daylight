@@ -8,6 +8,7 @@ export interface ObjMesh {
   name: string;
   positions: ArrayLike<number>; // xyz interleaved, world metres, Z-up
   indices: ArrayLike<number>; // triangle indices, 0-based
+  slots?: Uint16Array; // optics slot per triangle (core Mesh::slot; toDmesh writes it, toObj does not); absent = all slot 0
   id?: string; // stable identity for runRemote(): the server caches the mesh under it, so a re-run sends no bytes
 }
 
@@ -46,16 +47,18 @@ export function toObj(meshes: ObjMesh[]): string {
 }
 
 /**
- * One mesh -> `.dmesh` bytes (little-endian): "DLM1", uint32 0, uint64 nPoints/nFaces/nIndices,
- * float64 xyz[3*nPoints], int32 counts[nFaces] (all 3), int32 indices[nIndices]. Mesh name = file stem.
+ * One mesh -> `.dmesh` bytes (little-endian): "DLM1", uint32 flags, uint64 nPoints/nFaces/nIndices,
+ * float64 xyz[3*nPoints], int32 counts[nFaces] (all 3), int32 indices[nIndices], then with `slots` (flags 1, else 0)
+ * uint16 slot[nFaces]. Mesh name = file stem.
  */
 export function toDmesh(mesh: ObjMesh): Uint8Array<ArrayBuffer> {
-  const N = mesh.positions.length / 3, F = mesh.indices.length / 3, M = mesh.indices.length;
+  const N = mesh.positions.length / 3, F = mesh.indices.length / 3, M = mesh.indices.length, S = mesh.slots;
   if (!Number.isInteger(N) || !Number.isInteger(F)) throw new Error(`${mesh.name}: positions must be xyz triples, indices triangle triples`);
-  const buf = new ArrayBuffer(32 + 24 * N + 4 * F + 4 * M);
+  if (S && S.length !== F) throw new Error(`${mesh.name}: slots must hold one value per triangle (${F}), not ${S.length}`);
+  const buf = new ArrayBuffer(32 + 24 * N + 4 * F + 4 * M + (S ? 2 * F : 0));
   const dv = new DataView(buf);
   new Uint8Array(buf, 0, 4).set([0x44, 0x4c, 0x4d, 0x31]); // "DLM1"
-  dv.setUint32(4, 0, true);
+  dv.setUint32(4, S ? 1 : 0, true); // flags: bit 0 = slot block
   dv.setBigUint64(8, BigInt(N), true);
   dv.setBigUint64(16, BigInt(F), true);
   dv.setBigUint64(24, BigInt(M), true);
@@ -67,6 +70,7 @@ export function toDmesh(mesh: ObjMesh): Uint8Array<ArrayBuffer> {
     if (!(Number.isInteger(v) && v >= 0 && v < N)) throw new Error(`${mesh.name}: index out of range in face ${Math.floor(i / 3)}`);
     idx[i] = v;
   }
+  if (S) new Uint16Array(buf, 32 + 24 * N + 4 * F + 4 * M, F).set(S);
   return new Uint8Array(buf);
 }
 

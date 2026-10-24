@@ -231,20 +231,24 @@ namespace {
 
 // One .dmesh image in memory -> Mesh named `name`; `label` names the source in error messages (the path for files).
 bool parse_dmesh(const char* data, size_t size, const std::string& name, const std::string& label, std::vector<Mesh>& out, std::string& err) {
-  struct Header { char magic[4]; uint32_t reserved; uint64_t nPoints, nFaces, nIndices; };
+  struct Header { char magic[4]; uint32_t flags; uint64_t nPoints, nFaces, nIndices; };   // flags bit 0: slot block
   static_assert(sizeof(Header) == 32 && sizeof(int) == 4, "dmesh layout");
   Header h{};
   if (size < sizeof h) { err = label + ": truncated"; return false; }
   std::memcpy(&h, data, sizeof h);
   if (std::memcmp(h.magic, "DLM1", 4)) { err = label + ": not a .dmesh file (magic DLM1)"; return false; }
-  if (!(h.nPoints <= size / 24 && h.nFaces <= size / 4 && h.nIndices <= size / 4 &&   // no overflow in the sum below
+  if (h.flags & ~1u) { err = label + ": unsupported header flags " + std::to_string(h.flags) + " (only bit 0, the slot block, is defined)"; return false; }
+  if (!(h.nPoints <= size / 24 && h.nFaces <= size / 4 && h.nIndices <= size / 4 &&   // no overflow in the sums below
         32 + 24 * h.nPoints + 4 * h.nFaces + 4 * h.nIndices <= size)) { err = label + ": truncated"; return false; }
+  const uint64_t nSlots = (h.flags & 1) ? h.nFaces : 0;
+  if (32 + 24 * h.nPoints + 4 * h.nFaces + 4 * h.nIndices + 2 * nSlots > size) { err = label + ": truncated slot block"; return false; }
   Mesh m; m.name = name;
-  m.points.resize(3 * h.nPoints); m.counts.resize(h.nFaces); m.indices.resize(h.nIndices);
+  m.points.resize(3 * h.nPoints); m.counts.resize(h.nFaces); m.indices.resize(h.nIndices); m.slot.resize(nSlots);
   const char* p = data + sizeof h;
   std::memcpy(m.points.data(), p, 24 * h.nPoints); p += 24 * h.nPoints;
   std::memcpy(m.counts.data(), p, 4 * h.nFaces); p += 4 * h.nFaces;
-  std::memcpy(m.indices.data(), p, 4 * h.nIndices);
+  std::memcpy(m.indices.data(), p, 4 * h.nIndices); p += 4 * h.nIndices;
+  std::memcpy(m.slot.data(), p, 2 * nSlots);
   uint64_t sum = 0;
   for (int c : m.counts) { if (c < 3) { err = label + ": face with fewer than 3 vertices"; return false; } sum += (uint64_t)c; }
   if (sum != h.nIndices) { err = label + ": sum(counts) != n_indices"; return false; }

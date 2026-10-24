@@ -54,12 +54,15 @@ await applyToThree(mesh, values.slice(first, first + count).map((r) => r[col]));
   (per-vertex, geometry unchanged). Colours from `colormap()` or from `rgb` (3 floats per value). Sets the `color`
   attribute and, unless `material: false`, `mesh.material = new MeshStandardMaterial({ vertexColors: true })`.
   Imports `three` lazily; returns the RGB array.
-- `ObjMesh { name, positions /* xyz, metres, Z-up */, indices /* 0-based triangles */ }`.
+- `ObjMesh { name, positions /* xyz, metres, Z-up */, indices /* 0-based triangles */, slots?, id? }`. `slots`: optional
+  `Uint16Array`, one optics slot per triangle (the core's `Mesh::slot`; absent = every triangle slot 0), written by
+  `toDmesh` (so by `run` and `runRemote`: part of the bytes the server caches under `id`); `toObj` drops it.
 - `fromThree(objects, { scale })`: `updateMatrixWorld(true)`, applies `matrixWorld`, converts `(x, y, z) -> (x, -z, y)`,
   reverses winding when `det(matrixWorld) < 0`. Triangle `BufferGeometry` only (indexed or not); no strips, fans or lines.
 - `fromGLB(data, { scale })`: via `@gltf-transform/core`; `TRIANGLES` primitives of every node with a mesh,
   name `node/mesh`. Same frame conversion and winding rule.
-- `toDmesh(mesh)`: one mesh -> `Uint8Array` in the `.dmesh` layout below; throws on bad indices.
+- `toDmesh(mesh)`: one mesh -> `Uint8Array` in the `.dmesh` layout below (flags 1 + the slot block when `mesh.slots`
+  is set, else flags 0); throws on bad indices or a `slots` length other than the triangle count.
 - `toObj(meshes)`: one `o` group per mesh, 1-based global indices; throws on bad indices (interop with other OBJ tools).
 - `run(exe, { sensors, context?, args })`: temp dir, `exe <sensors...> [--context <file>]... ...args --out out.npy`,
   returns `{ values: Float64Array[] (one per element), columns, manifest }`; rejects with the core's stderr.
@@ -100,14 +103,17 @@ One mesh per file, little-endian, no library semantics. Mesh name = file stem.
 
 ```text
 offset  0  char[4]   "DLM1"                 magic + version
-offset  4  uint32    0                      reserved (keeps the arrays 8-byte aligned)
+offset  4  uint32    flags                  bit 0: slot block present; other bits must be 0 (keeps the arrays 8-byte aligned)
 offset  8  uint64    n_points
 offset 16  uint64    n_faces
 offset 24  uint64    n_indices
 offset 32  float64   xyz[3 * n_points]      world metres, Z-up
            int32     counts[n_faces]        vertices per face (>= 3), right-handed winding; toDmesh writes 3
            int32     indices[n_indices]     0-based, sum(counts) == n_indices
+           uint16    slot[n_faces]          only with flags bit 0: optics slot of each face (ObjMesh.slots)
 ```
+
+The core rejects other flag bits and a short slot block ([docs/input.md](../../docs/input.md)).
 
 ```sh
 npm install && npm run build && npm test

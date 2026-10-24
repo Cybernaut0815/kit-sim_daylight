@@ -4,20 +4,25 @@
 
 | input | role | availability |
 |---|---|---|
-| `.dmesh` | native: raw arrays, one mesh per file, name = file stem (layout below) | always; the bindings write it |
+| `.dmesh` | native: raw arrays, one mesh per file, name = file stem, optional per-face slots (layout below) | always; the bindings write it |
 | `.obj` | interop text: world metres, Z-up, right-handed winding, one `o`/`g` group per mesh, 1-based global `v` indices (negative = relative); `vt`/`vn` ignored | always |
 | `.usd` `.usda` `.usdc` `.usdz` | interop via LightUSD (`read_usd`), every mesh of the stage, name = prim path | `-DDAYLIGHT_USD=ON`; the Python binding converts USD without it |
 
 ```
 offset  0  char[4]   "DLM1"                 magic + version
-offset  4  uint32    0                      reserved (keeps the arrays 8-byte aligned)
+offset  4  uint32    flags                  bit 0: slot block present; other bits must be 0 (keeps the arrays 8-byte aligned)
 offset  8  uint64    n_points
 offset 16  uint64    n_faces
 offset 24  uint64    n_indices
 offset 32  float64   xyz[3 * n_points]      world metres, Z-up
            int32     counts[n_faces]        vertices per face (>= 3), right-handed winding
            int32     indices[n_indices]     0-based, sum(counts) == n_indices
+           uint16    slot[n_faces]          only with flags bit 0: optics slot of each face (daylight::Mesh::slot)
 ```
+
+Without the slot block every face is slot 0. A flag bit other than bit 0, or a slot block shorter than `n_faces`
+values, is an error; bytes after the last array are ignored (readers older than the slot block read such a file
+as plain geometry). OBJ and USD input is geometry only: every face is slot 0.
 
 Positional files are analysed (sensors) and, by default, also block rays; `--context FILE` files block only (roles
 are per file). Location and time: `--epw FILE` gives weather and location, `--clear-sky` synthesises weather for

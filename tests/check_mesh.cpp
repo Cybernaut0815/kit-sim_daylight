@@ -3,6 +3,7 @@
 #include "internal.h"
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 using namespace daylight;
@@ -170,7 +171,8 @@ int check_mesh(const char* testsDir) {
     }
   }
 
-  // --- .dmesh: quad + triangle round trip; bad magic, truncated (header only), index out of range -> false + err
+  // --- .dmesh: quad + triangle round trip; bad magic, truncated (header only), index out of range -> false + err;
+  //     slot block (flags bit 0), truncated block, unknown flag bits
   {
     std::string tmp = std::string(testsDir) + "/_check_mesh_tmp.dmesh";
     const double P[15] = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 2, 0, 0};
@@ -200,14 +202,32 @@ int check_mesh(const char* testsDir) {
     // memory overload: the same image from a buffer, name given by the caller, label in errors
     std::string buf;
     {
-      const uint32_t reserved = 0; const uint64_t counts[3] = {5, 2, 7};
+      const uint32_t flags = 0; const uint64_t counts[3] = {5, 2, 7};
       I[6] = 2;
-      buf.append("DLM1", 4); buf.append(reinterpret_cast<const char*>(&reserved), 4); buf.append(reinterpret_cast<const char*>(counts), 24);
+      buf.append("DLM1", 4); buf.append(reinterpret_cast<const char*>(&flags), 4); buf.append(reinterpret_cast<const char*>(counts), 24);
       buf.append(reinterpret_cast<const char*>(P), 120); buf.append(reinterpret_cast<const char*>(C), 8); buf.append(reinterpret_cast<const char*>(I), 28);
     }
     ms.clear();
     CHECK(read_dmesh(buf.data(), buf.size(), "upload", ms, err) && ms.size() == 1 && ms[0].name == "upload" && ms[0].indices.size() == 7 && ms[0].points == std::vector<double>(P, P + 15));
+    CHECK(ms.size() == 1 && ms[0].slot.empty());
     err.clear(); CHECK(!read_dmesh(buf.data(), 32, "upload", ms, err) && err.find("upload") != std::string::npos);
+    // slot block: flags bit 0 -> uint16 slot[n_faces] after the indices; truncated block, other bits -> false + err
+    std::string sb = buf;
+    const uint16_t S[2] = {7, 65535};
+    sb[4] = 1; sb.append(reinterpret_cast<const char*>(S), 4);
+    ms.clear(); err.clear();
+    CHECK(read_dmesh(sb.data(), sb.size(), "upload", ms, err) && ms.size() == 1 && ms[0].slot == std::vector<uint16_t>({7, 65535}));
+    CHECK(ms.size() == 1 && ms[0].counts == std::vector<int>({4, 3}) && ms[0].indices == std::vector<int>({0, 1, 2, 3, 1, 4, 2}));
+    for (size_t n : {sb.size() - 1, buf.size()}) {   // half a block, no block
+      ms.clear(); err.clear();
+      CHECK(!read_dmesh(sb.data(), n, "upload", ms, err) && ms.empty() && err.find("truncated slot block") != std::string::npos);
+    }
+    for (uint32_t bad : {3u, 2u, 0x80000000u}) {
+      std::memcpy(&sb[4], &bad, 4); ms.clear(); err.clear();
+      CHECK(!read_dmesh(sb.data(), sb.size(), "upload", ms, err) && ms.empty() && err.find("flags") != std::string::npos);
+    }
+    std::memset(&sb[4], 0, 4); ms.clear();   // flags 0: trailing bytes ignored, as by readers before the slot block
+    CHECK(read_dmesh(sb.data(), sb.size(), "upload", ms, err) && ms.size() == 1 && ms[0].slot.empty());
     buf[3] = '9'; err.clear(); CHECK(!read_dmesh(buf.data(), buf.size(), "upload", ms, err) && !err.empty());
   }
   if (failures) std::printf("check_mesh: %d failure(s)\n", failures);
