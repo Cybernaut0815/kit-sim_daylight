@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // Checks for mesh.cpp: OBJ / .dmesh readers, triangulation, sensor rules (ladybug / physical), sides, offset, optics
-// slots (thin solids, --optics grammar via cli::parse, resolution and its errors).
+// slots (thin solids, --optics / --bounces grammar via cli::parse, resolution and its errors).
 #include "cli.h"
 #include "glass.h"
 #include "internal.h"
@@ -337,6 +337,24 @@ int check_mesh(const char* testsDir) {
     CHECK(parse({"m.obj", "--mode", "ladybug", "--optics", "a=0.2,0.5", "--transmission", "off"}, a, err) == 0);   // optics: a no-op there
     Options lbt; lbt.mode = Mode::Ladybug; lbt.transmission = true;
     CHECK(!optics_ok(lbt, err));   // run() checks the same
+    // --bounces 0..20, --bounce-samples 64..65536: whole numbers; ladybug refuses bounces (0 is a no-op there)
+    CHECK(parse({"m.obj"}, a, err) == 0 && a.opt.bounces == 0 && a.opt.bounceSamples == 1024);
+    CHECK(parse({"m.obj", "--bounces", "20", "--bounce-samples", "64"}, a, err) == 0 && a.opt.bounces == 20 && a.opt.bounceSamples == 64);
+    CHECK(parse({"m.obj", "--bounces", "0", "--bounce-samples", "65536"}, a, err) == 0 && a.opt.bounces == 0 && a.opt.bounceSamples == 65536);
+    const char* badB[][3] = {{"--bounces", "21", "0..20"}, {"--bounces", "-1", "0..20"}, {"--bounces", "1.5", "whole number"},
+                             {"--bounces", "two", "whole number"}, {"--bounces", "", "whole number"}, {"--bounces", "99999999999", "whole number"},
+                             {"--bounce-samples", "63", "64..65536"}, {"--bounce-samples", "65537", "64..65536"}, {"--bounce-samples", "1e3", "whole number"}};
+    for (const auto& b : badB) {
+      const int rc = parse({"m.obj", b[0], b[1]}, a, err);
+      CHECK(rc == 1 && err.find(b[2]) != std::string::npos);
+      if (rc != 1 || err.find(b[2]) == std::string::npos) std::printf("  %s '%s': rc %d, '%s'\n", b[0], b[1], rc, err.c_str());
+    }
+    CHECK(parse({"m.obj", "--bounces"}, a, err) == 1 && err == "missing value for --bounces");
+    CHECK(parse({"m.obj", "--mode", "ladybug", "--bounces", "1"}, a, err) == 1 && err.find("physical") != std::string::npos);
+    CHECK(parse({"m.obj", "--mode", "ladybug", "--bounces", "0", "--bounce-samples", "4096"}, a, err) == 0);
+    Options lbb; lbb.mode = Mode::Ladybug; lbb.bounces = 2;
+    Options few; few.bounceSamples = 0;
+    CHECK(!optics_ok(lbb, err) && !optics_ok(few, err));   // run() checks the same
   }
 
   // --- resolution: precedence NAME/SLOT > NAME > * > built-in (rho 0.2, tau 0), glass tn, and every error

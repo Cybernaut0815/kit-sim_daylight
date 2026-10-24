@@ -24,7 +24,8 @@ inline float3 neg(float3 v) { return float3{-v.x, -v.y, -v.z}; }
 // Process-lifetime GPU state. Created on first use and never destroyed: CUDA / OptiX teardown from a static
 // destructor runs after the runtime has unloaded and can crash at exit, and the OS reclaims the device anyway.
 // gpu_build / upload / grow free or reuse their previous buffers, so one Gpu serves every run of the process.
-// `key` is the Options::sceneKey (+ the transmitting slots) whose occluder triangles / GAS are resident (empty = none).
+// `key` is the Options::sceneKey (+ the transmitting slots, or that the bounce pass needs a hit record per slot) whose
+// occluder triangles / GAS are resident (empty = none).
 // Not thread-safe: run() is one-at-a-time, as the CLI and the server (one GPU, a mutex) use it.
 // `cur` is the scene installed in the Gpu; `parked` holds up to Options::residentScenes - 1 other scenes' GAS in VRAM,
 // most recent first, so users who alternate between scenes do not rebuild each other's.
@@ -79,6 +80,11 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
     int m = static_cast<int>(std::lround(std::sqrt(static_cast<double>(K))));
     if (m * m != K) { err = "--patch-samples must be a square number (1, 4, 9, 16, ...)"; return false; }
   }
+  // Reflected light (--bounces) goes into radiation, diffuse, irradiance, illuminance and the series, not direct / sun hours.
+  const bool series = !opt.seriesPath.empty();
+  bool wantDc = series && needWeather;
+  for (Quantity q : opt.quantities) wantDc = wantDc || (q != Quantity::Direct && q != Quantity::SunHours);
+  const bool reflect = opt.bounces > 0 && wantDc;
   // One clock per run: the weather's. --tz is the clock of the user's timestamps; with weather they are moved into the
   // weather's clock (shift), so its rows stay paired with the sun of their own hour whatever --tz says.
   double lat = w ? w->lat : opt.lat, lon = w ? w->lon : opt.lon, tz = w ? w->tz : opt.tz;
@@ -103,25 +109,29 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
 
   // ---- geometry ------------------------------------------------------------------------------------------------
   // Optics per global slot. --transmission off: every slot opaque (bits, no any-hit); --fresnel off: glass passes tau.
-  // Only a slot with faces in the GAS transmits (not a sensor mesh's under --no-self-occlude, nor an id no face uses).
+  // Only a slot with faces in the GAS transmits (not a sensor mesh's under --no-self-occlude, nor an id no face uses),
+  // and only those slots' rho matter to the bounce pass.
   std::vector<Slot> slots;
   if (!resolve_optics(meshes, opt.optics, slots, err)) return false;
-  std::vector<char> inGas(opt.transmission ? slots.size() : 0, 0);
-  for (size_t k = 0, b = 0; opt.transmission && k < meshes.size(); b += slot_count(meshes[k++])) {
+  std::vector<char> inGas(opt.transmission || reflect ? slots.size() : 0, 0);
+  for (size_t k = 0, b = 0; !inGas.empty() && k < meshes.size(); b += slot_count(meshes[k++])) {
     const Mesh& m = meshes[k];
     if (m.sensor && !opt.selfOcclude) continue;
     if (m.slot.empty()) inGas[b] = !m.counts.empty();
     else for (uint16_t s : m.slot) inGas[b + s] = 1;
   }
   std::string lit;   // the transmitting slots: built into the GAS (geometry flags, thin solids), so part of its identity
+  float rho0 = -1;   // reflect: rho of the first slot in the GAS
+  bool rhoDiffers = false;   // ... and another's differs: the bounce pass needs a hit record per slot
   for (size_t s = 0; s < slots.size(); ++s) {
     if (!opt.transmission || !inGas[s]) slots[s].tau = 0;
     if (!opt.fresnel) slots[s].flags &= ~kSlotGlass;
     if (slots[s].tau > 0) lit += (lit.empty() ? "" : ",") + std::to_string(s);
+    if (reflect && inGas[s]) { if (rho0 < 0) rho0 = slots[s].rho; else rhoDiffers = rhoDiffers || slots[s].rho != rho0; }
   }
-  const bool translucent = !lit.empty();
+  const bool translucent = !lit.empty(), slotted = translucent || rhoDiffers;   // per-triangle SBT offsets (gpu_build)
   Resident& R = resident();
-  const std::string key = opt.sceneKey.empty() || lit.empty() ? opt.sceneKey : opt.sceneKey + "\ntransmitting " + lit;
+  const std::string key = opt.sceneKey.empty() || !slotted ? opt.sceneKey : opt.sceneKey + (translucent ? "\ntransmitting " + lit : "\nslot records");
   const bool installed = !key.empty() && R.gpu && key == R.cur.key;   // same meshes + selfOcclude as the scene in the Gpu
   const auto parkedAt = [&] { return std::find_if(R.parked.begin(), R.parked.end(), [&](const Scene& s) { return s.key == key; }); };
   const bool reuse = installed || (!key.empty() && R.gpu && parkedAt() != R.parked.end());
@@ -209,7 +219,6 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
 
   // ---- sky model per step ----------------------------------------------------------------------------------------
   // Series columns: non-night steps. S is radiometric (W/m2/sr) unless the first quantity is illuminance (then lux/sr).
-  const bool series = !opt.seriesPath.empty();
   const bool seriesVis = series && opt.quantities[0] == Quantity::Illuminance;
   std::vector<int> colOf(T, -1);
   int Tup = 0;
@@ -218,12 +227,15 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   const size_t Pz = static_cast<size_t>(P);
   std::vector<float> S;                          // [P x Tup]
   std::vector<float> gSeries;                    // [Tup]
+  std::vector<float> Sdc;                        // reflect: [(P+1) x Tup] bin radiance, bin 0 ground, 1 + p sky + the sun binned
   if (series) { S.assign(Pz * static_cast<size_t>(Tup), 0.f); gSeries.assign(static_cast<size_t>(Tup), 0.f); }
+  if (series && reflect) Sdc.assign((Pz + 1) * static_cast<size_t>(Tup), 0.f);
   // per-direction cumulative weights (double): sky radiometric/visible, ground scalar, sun per direction
   std::vector<double> skyRad(Pz, 0.0), skyVis(Pz, 0.0), skyDirLB(Pz, 0.0), skyDifLB(Pz, 0.0);
   double gndRad = 0, gndVis = 0, gndLB = 0;
   std::vector<double> sunRad(nSun, 0.0), sunVis(nSun, 0.0);
-  std::vector<float> buf(3 * (Pz + 1)), buf2(3 * (Pz + 1));
+  std::vector<double> sunBinRad(reflect ? Pz : 0, 0.0), sunBinVis(reflect ? Pz : 0, 0.0);   // the sun binned as gendaymtx -d
+  std::vector<float> buf(3 * (Pz + 1)), buf2(3 * (Pz + 1)), buf3(reflect ? 3 * (Pz + 1) : 0);
   // ladybug emulation state (gendaymtx -A float accumulation over all rows, wea-rounded location/irradiance)
   std::vector<float> accDir(Pz, 0.f), accDif(3 * Pz, 0.f);
   std::vector<float> lbDif3g;                    // for --dump-sky: averaged RGB (ground row first), dif then dir
@@ -274,6 +286,15 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
           if (col >= 0 && !seriesVis) S[p * static_cast<size_t>(Tup) + static_cast<size_t>(col)] = static_cast<float>(Lp);
         }
         if (col >= 0 && !seriesVis) gSeries[static_cast<size_t>(col)] = static_cast<float>(g);
+        if (reflect) {   // reflected light sees the sun as gendaymtx bins it (AddDirect), like rcontrib daylight coefficients
+          gendaymtx_step(pa, s.jd, alt, azi, s.dni, s.dhi, opt.ground, true, false, false, buf3.data());
+          for (size_t p = 0; p < Pz; ++p) {
+            const double Ls = bright(&buf3[3 * (p + 1)]);
+            sunBinRad[p] += Ls * dt / 1000.0;
+            if (col >= 0 && !seriesVis) Sdc[(p + 1) * static_cast<size_t>(Tup) + static_cast<size_t>(col)] = S[p * static_cast<size_t>(Tup) + static_cast<size_t>(col)] + static_cast<float>(Ls);
+          }
+          if (col >= 0 && !seriesVis) Sdc[static_cast<size_t>(col)] = static_cast<float>(g);
+        }
       }
       if (wantVis || seriesVis) {
         gendaymtx_step(pa, s.jd, alt, azi, s.dni, s.dhi, opt.ground, false, true, true, buf.data());
@@ -290,6 +311,12 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
         double dirIll = 0;
         for (size_t p = 0; p < Pz; ++p) dirIll += buf2[3 * (p + 1) + 1] * pa.omega[p];
         if (sunIdxOfStep[t] != SIZE_MAX) sunVis[sunIdxOfStep[t]] = kWhtEfficacy * dirIll * dt;
+        for (size_t p = 0; reflect && p < Pz; ++p) {
+          const double Ls = kWhtEfficacy * bright(&buf2[3 * (p + 1)]);
+          sunBinVis[p] += Ls * dt;
+          if (col >= 0 && seriesVis) Sdc[(p + 1) * static_cast<size_t>(Tup) + static_cast<size_t>(col)] = S[p * static_cast<size_t>(Tup) + static_cast<size_t>(col)] + static_cast<float>(Ls);
+        }
+        if (reflect && col >= 0 && seriesVis) Sdc[static_cast<size_t>(col)] = static_cast<float>(g);
       }
       if (sunIdxOfStep[t] != SIZE_MAX) sunRad[sunIdxOfStep[t]] = s.dni * dt / 1000.0;
       else if (s.dni > 0) droppedDni += s.dni * dt;
@@ -353,6 +380,16 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
     if (!ladybug && wantSun)
       for (size_t j = 0; j < nSun; ++j) W[sun0 + j] = static_cast<float>(vis ? sunVis[j] : sunRad[j]);
   }
+  // reflected light: radiance per gpu_bounce bin (0 ground, 1 + p sky + the sun binned), no cosine (the rows hold it);
+  // radiation / diffuse / irradiance radiometric, illuminance visible, direct and sun hours none
+  std::vector<std::vector<float>> Wdc(nQ);
+  for (size_t qi = 0; reflect && qi < nQ; ++qi) {
+    const Quantity q = opt.quantities[qi];
+    if (q == Quantity::Direct || q == Quantity::SunHours) continue;
+    const bool vis = q == Quantity::Illuminance;
+    Wdc[qi].assign(Pz + 1, static_cast<float>(vis ? gndVis : gndRad));
+    for (size_t p = 0; p < Pz; ++p) Wdc[qi][p + 1] = static_cast<float>(vis ? skyVis[p] + sunBinVis[p] : skyRad[p] + sunBinRad[p]);
+  }
 
   // ---- GPU -----------------------------------------------------------------------------------------------------
   std::vector<double> acc(nSens * nQ, 0.0);
@@ -386,23 +423,28 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
         s.gas = GasSlot{};
         R.cur = s;
       } else {
-        if (!gpu_build(*g, tris, slots, err)) return false;
+        if (!gpu_build(*g, tris, slots, err, slotted)) return false;
         R.cur.key = key; std::copy(c, c + 3, R.cur.c); R.cur.nTris = tris.i.size(); R.cur.skipped = skipped; R.cur.thin = thin;
       }
-      // ponytail: 1 GB VRAM floor for parked scenes (a chunk may hold 2 x 256 MiB: visibility + series tile); derive it
-      // from the run's own needs if large scenes start to fail
+      // ponytail: 1 GB VRAM floor for parked scenes (a chunk may hold 3 x 256 MiB: visibility, series tile, bounce rows);
+      // derive it from the run's own needs if large scenes start to fail
       while (!R.parked.empty() && (R.parked.size() + 1 > size_t(std::max(1, opt.residentScenes)) || gpu_free_bytes() < (size_t(1) << 30))) {
         gpu_free(R.parked.back().gas);
         R.parked.pop_back();
       }
     }
-    const std::vector<Slot> opaque(1);   // a GAS without transmitting slots has one record (ids may run to 65535 per mesh)
-    if (!gpu_set_scene(*g, sens, D, err) || !gpu_set_slots(*g, translucent ? slots : opaque, err)) return false;
-    // ponytail: 256 MiB cap on each per-chunk buffer, visibility (bits, or transmittance bytes) and the series tile; make
-    // it a device-memory fraction if it ever thrashes
-    const size_t perSensor = std::max(translucent ? nDir : 4 * nWords, series ? 4 * size_t(Tup) : size_t(0));
+    // a GAS without per-slot records has one, every slot's (ids may run to 65535 per mesh): opaque, of their one rho
+    const std::vector<Slot> one{Slot{rho0 < 0 ? Slot{}.rho : rho0}};
+    if (!gpu_set_scene(*g, sens, D, err) || !gpu_set_slots(*g, slotted ? slots : one, err)) return false;
+    // ponytail: 256 MiB cap on each per-chunk buffer, visibility (bits, or transmittance bytes), the series tile and the
+    // bounce rows; make it a device-memory fraction if it ever thrashes. The rows follow --sky-density (P + 1 bins): at
+    // MF 4 they cut chunks to ~29k sensors, which slowed both passes on --bench (not on a city-like scene); bin
+    // reflected light coarser if that matters
+    const size_t perSensor = std::max({translucent ? nDir : 4 * nWords, series ? 4 * size_t(Tup) : size_t(0), reflect ? 4 * (Pz + 1) : size_t(0)});
     const size_t ncMax = std::max<size_t>(1, (size_t(256) << 20) / std::max<size_t>(1, perSensor));
     const unsigned flags = gpu_ray_flags(opt.cullBackfaces, translucent);
+    Bounce bounce;
+    bounce.N = unsigned(opt.bounces); bounce.M = unsigned(opt.bounceSamples); bounce.mf = opt.mf; bounce.north = opt.north; bounce.cancel = opt.cancel;
     std::vector<double> tmp;
     std::vector<float> G, E;
     std::vector<float3> sunVec(nSun);
@@ -424,6 +466,12 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
       for (size_t qi = 0; qi < nQ; ++qi) {
         if (!gpu_reduce(*g, nc, Wq[qi].data(), opt.quantities[qi] != Quantity::SunHours, tmp.data(), err)) return false;
         for (size_t i = 0; i < nc; ++i) acc[(i0 + i) * nQ + qi] = tmp[i];
+      }
+      if (reflect && !gpu_bounce(*g, i0, nc, gpu_bounce_flags(opt.cullBackfaces), bounce, err)) return false;
+      for (size_t qi = 0; qi < nQ; ++qi) {
+        if (Wdc[qi].empty()) continue;
+        if (!gpu_reduce_dc(*g, nc, Wdc[qi].data(), tmp.data(), err)) return false;
+        for (size_t i = 0; i < nc; ++i) acc[(i0 + i) * nQ + qi] += tmp[i];
       }
       if (bf && translucent) {   // direction-major bytes on the device -> row-major [nc x nDir] rows
         if (!gpu_download_bytes(*g, nc, byteBuf, err)) return false;
@@ -449,6 +497,7 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
         in.wsky = wsky.data(); in.S = S.data(); in.g = gSeries.data(); in.G = G.data();
         in.sun0 = static_cast<unsigned>(sun0); in.nSun = static_cast<unsigned>(nSun);
         in.sunStep = sunCol.data(); in.sunVec = sunVec.data(); in.sunW = sunW.data();
+        in.Sdc = reflect ? Sdc.data() : nullptr;
         E.assign(nc * static_cast<size_t>(Tup), 0.f);
         if (Tup > 0 && !gpu_series(*g, nc, in, E.data(), err)) return false;
         if (std::fwrite(E.data(), sizeof(float), E.size(), sf.get()) != E.size()) { err = "write failed: " + opt.seriesPath; return false; }
@@ -459,6 +508,9 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
       std::fprintf(stderr, "info: GAS %.1f MB build %.0f ms, %zu launches, %.3g rays in %.0f ms (%.2f GRays/s)\n",
                    st.gasBytes / 1048576.0, st.buildMs, st.launches, static_cast<double>(st.rays), st.traceMs,
                    st.traceMs > 0 ? static_cast<double>(st.rays) / st.traceMs / 1e6 : 0.0);
+      if (reflect)
+        std::fprintf(stderr, "info: reflected light: %d bounces, %d samples per sensor, %.3g paths in %.0f ms (%zu launches)%s\n", opt.bounces,
+                     opt.bounceSamples, static_cast<double>(st.paths), st.bounceMs, st.bounceLaunches, rhoDiffers ? ", a hit record per slot" : "");
     }
   }
   if (sf) {

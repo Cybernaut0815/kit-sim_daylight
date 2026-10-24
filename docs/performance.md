@@ -20,6 +20,37 @@ bytes, 18 chunks of 256 MiB), wall 5.2 s instead of 3.9. Rays go on through ever
 porous (100 k sensors, 0.3 M triangles) the trace runs at 0.5 GRays/s instead of 3.5. Byte-mode launches start at
 2^13 threads and aim at 30 ms, leaving room below the TDR when the crossings vary from sensor to sensor.
 
+Reflected light (`--bounces N`, `--bounce-samples 1024`): a second pass per chunk, one thread per sensor tracing its
+paths from closest hit to closest hit. 1 M sensors, annual clear sky (Boston, `--clear-sky --lat 42.35 --lon -71.07`),
+the GPU shared with another session (15-30 % load, 79 C: the visibility pass ran ~10 % below the table above):
+
+| scene | sky density | bounces | reflected-light pass | paths/s | wall total |
+|---|---|---|---|---|---|
+| grid + 10 k boxes (`--bench 1000000 120000`) | 1 | 1 | 2.1 s | 494 M | 5.6 s |
+| | 1 | 2 | 2.2 s | 455 M | 5.5 s |
+| | 4 | 1 | 2.1 s | 485 M | 7.9 s |
+| | 4 | 2 | 2.3 s | 453 M | 7.7 s |
+| the same, `--transmission on --optics bench_boxes/1=0.2,0.5,porous` | 1 | 1 | 2.9 s | 357 M | 7.2 s |
+| `--bench` (12 M triangles) | 1 | 1 | 69 s | 15 M | 76 s |
+| | 1 | 2 | 103 s | 10 M | 111 s |
+| | 4 | 1 | 175 s | 6 M | 194 s |
+| | 4 | 2 | 203 s | 5 M | 220 s |
+
+Closest hits have no first-hit exit, so the pass depends on the geometry far more than the visibility does: `--bench`
+puts 833 k random boxes on 1 km^2, overlapping ~250 deep, the worst case for closest hits (30x slower per path than
+the city-like 10 k boxes; the visibility pass does not notice). A second bounce adds ~8 % (outdoors few paths survive
+the Russian roulette at the second reflection); time is linear in M. At sky density 4 the rows (2306 bins, 9 kB per
+sensor) cut chunks to 29 k sensors (35 chunks instead of 3), which costs the city-like scene nothing but slowed both
+passes of `--bench` (launch tails, there and in the visibility's smaller launches). Without `--bounces` the pass does
+not run and the visibility keeps its kernel (byte mode has its own raygen, the default bits one is the original):
+`--bench` best of 3 against the build before reflected light, interleaved, 1.37 vs 1.36 GRays/s (both throttled at
+88 C).
+
+Noise (canyon fixture, 400 facade sensors with a ground mesh, one bounce, against M = 65536): at M 1024 the annual
+radiation is within 0.5 % (median sensor) and 2.3 % (95th percentile) of the reference, the reflected part itself
+(~11 % of the total) within 4.5 % / 13 %; a single instant (06-21 12:00) within 2.3 % / 14 %, its reflected part
+17 % / 48 %. Sums over the sensors are unbiased (< 0.07 %); everything scales as 1 / sqrt(M).
+
 Mesh transport (`validate/ingest.py`, 1000 x 1000 quad grid = 1 002 001 points / 2M triangles, one time step, same
 machine, seconds, best of 2; the USD rows need the `vs2022-usd` build):
 

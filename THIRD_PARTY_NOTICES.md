@@ -118,6 +118,10 @@ NVIDIA display driver.
 
 - Ray origin offset: C. Waechter and N. Binder, "A Fast and Robust Method for Avoiding Self-Intersection",
   Ray Tracing Gems, 2019 (algorithm re-implemented from the paper in src/trace_dev.cu).
+- Reflected-light sampling in src/trace_dev.cu, re-implemented from the papers: the pcg3d hash of M. Jarzynski and
+  M. Olano, "Hash Functions for GPU Rendering", JCGT 9(3), 2020; the orthonormal basis of T. Duff et al., "Building an
+  Orthonormal Basis, Revisited", JCGT 6(1), 2017; Hammersley points with a Cranley-Patterson rotation. The bins follow
+  Radiance's reinhart.cal (rbin) and gendaymtx's patch order.
 - Solar position: NOAA Solar Calculator equations (Jean Meeus, Astronomical Algorithms), public domain formulas,
   re-implemented in src/solar.cpp with the same conventions as Ladybug Tools so results can be compared.
 - Ladybug Tools (AGPL-3.0) is used only as a validation oracle in validate/ (separate Python environment); it is

@@ -20,7 +20,8 @@ struct Args {
 };
 
 // argv[1..argc) -> a. 0 ok (-h/--help sets a.help and stops), 1 usage error with err set (the caller prints kUsage),
-// also for --optics rows out of range and switches the mode refuses. Mesh names in --optics are checked by run().
+// also for --optics rows, --bounces or --bounce-samples out of range and switches the mode refuses. Mesh names in
+// --optics are checked by run().
 int parse(int argc, char** argv, Args& a, std::string& err);
 // The rules that follow parsing: --clear-sky xor --epw; --clear-sky needs --lat --lon; tz defaults to round(lon / 15)
 // when --lat --lon come without --tz; weather from a.epw or the clear-sky model unless haveWeather is already true on

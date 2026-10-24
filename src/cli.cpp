@@ -35,6 +35,8 @@ const char* const kUsage =
     "                           default rho 0.2, tau 0)\n"
     "  --transmission off|on    light through glass / porous slots (default off: every surface opaque)\n"
     "  --fresnel on|off         glass transmittance by angle (default on; off: tau at every angle)\n"
+    "  --bounces N              reflected light: up to N = 1..20 diffuse reflections by RHO (physical; default 0: none)\n"
+    "  --bounce-samples M       paths per sensor for --bounces, 64..65536 (default 1024; noise falls as 1 / sqrt(M))\n"
     "  --out FILE[.npy]         values (text rows, or float64 [N x C] NumPy when .npy) + FILE.json manifest\n"
     "  --timeseries FILE.npy  --dump-bits FILE.npy  --dump-sky FILE  --dump-sun FILE\n"
     "  --bench [NSENS NTRIS]  -v          exit code: 1 usage, 2 runtime error\n";
@@ -136,6 +138,12 @@ int parse(int argc, char** argv, Args& a, std::string& err) {
     else if (f == "--optics") { if (!(v = need(i, "--optics"))) return 1; if (!parse_optics(v, a.opt.optics, err)) return 1; }
     else if (f == "--transmission") { if (!(v = need(i, "--transmission"))) return 1; if (!std::strcmp(v, "on")) a.opt.transmission = true; else if (!std::strcmp(v, "off")) a.opt.transmission = false; else { err = "--transmission off|on"; return 1; } }
     else if (f == "--fresnel") { if (!(v = need(i, "--fresnel"))) return 1; if (!std::strcmp(v, "on")) a.opt.fresnel = true; else if (!std::strcmp(v, "off")) a.opt.fresnel = false; else { err = "--fresnel on|off"; return 1; } }
+    else if (f == "--bounces" || f == "--bounce-samples") {   // ranges: optics_ok below
+      if (!(v = need(i, f.c_str()))) return 1;
+      int& n = f == "--bounces" ? a.opt.bounces : a.opt.bounceSamples;
+      const char* e = v + std::strlen(v);
+      if (const auto r = std::from_chars(v, e, n); r.ec != std::errc() || r.ptr != e) { err = f + " needs a whole number"; return 1; }
+    }
     else if (f == "--north") { if (!(v = need(i, "--north"))) return 1; a.opt.north = std::atof(v); }
     else if (f == "--offset") { if (!(v = need(i, "--offset"))) return 1; a.opt.offset = std::atof(v); }
     else if (f == "--out") { if (!(v = need(i, "--out"))) return 1; a.out = v; }

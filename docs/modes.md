@@ -16,6 +16,13 @@ n 1.52) or a flat tau. Ray bending is not modelled: a pane's faces are parallel,
 Sun hours with transmission count equivalent full-sun hours (an hour behind tau 0.6 counts 0.6). For EN 17037 / BRE
 sunlight checks on a window, leave the window's own glazing out of the model, or give its slot an Opening, tau 1
 (`--optics Facade/2=0,1 --transmission on`): the count then stays exact.
+`--bounces N` (physical mode only) adds the light the model reflects: up to N diffuse reflections by each slot's rho,
+glass mirroring its angle-dependent reflectance, binned into the sky patches (the sun binned as gendaymtx does, as
+`rcontrib` daylight coefficients) and the virtual ground. It goes into radiation, diffuse, irradiance and illuminance,
+never into direct or sun hours. Facades gain most: in a 1:1 street canyon with a ground mesh (everything rho 0.2) one
+bounce raises the annual radiation of the north-facing wall by about a third and of the south-facing one by 6 %; a
+modelled ground with one bounce gives a facade about what the virtual ground gave it without the mesh, minus the
+model's shadow on it.
 
 Weather sources, both modes: an EPW (`--epw`, measured/typical hourly DNI and DHI) or `--clear-sky`: for every hour
 of a 365-day year the Ineichen-Perez clear-sky model (as in pvlib `clearsky.ineichen`: Kasten-Young airmass,

@@ -121,6 +121,9 @@ bool optics_ok(const Options& opt, std::string& err) {
     if (o.glass && !(o.tau > 0 && o.tau <= 0.918)) { err = row + "glass TAU must be in (0, 0.918] (n 1.52 passes at most 0.918)"; return false; }
   }
   if (opt.transmission && opt.mode == Mode::Ladybug) { err = "--transmission on needs --mode physical (ladybug: every surface opaque and black)"; return false; }
+  if (opt.bounces < 0 || opt.bounces > 20) { err = "--bounces must be 0..20"; return false; }
+  if (opt.bounceSamples < 64 || opt.bounceSamples > 65536) { err = "--bounce-samples must be 64..65536"; return false; }
+  if (opt.bounces > 0 && opt.mode == Mode::Ladybug) { err = "--bounces needs --mode physical (ladybug: every surface opaque and black)"; return false; }
   return true;
 }
 

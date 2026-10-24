@@ -62,8 +62,8 @@ void triangulate(const Mesh& m, const double c[3], Tris& out, int& skipped, uint
 // Global slots: every mesh in input order takes slot_count(m) = max face slot + 1 (1 without slots); mesh base = the sum
 // over the meshes before it.
 size_t slot_count(const Mesh& m);
-// Optics rows within range (0..1, rho + tau <= 1; glass rho 0, 0 < tau <= 0.918) and the mode rules (ladybug: no
-// transmission). False + err naming the first bad row.
+// Optics rows within range (0..1, rho + tau <= 1; glass rho 0, 0 < tau <= 0.918), --bounces 0..20, --bounce-samples
+// 64..65536 and the mode rules (ladybug: no transmission, no bounces). False + err naming the first bad row or flag.
 bool optics_ok(const Options& opt, std::string& err);
 // One Slot per global slot from the rows (NAME/SLOT > NAME > * > rho 0.2 tau 0; glass: tn_from_Tn(tau), kSlotGlass).
 // Errors: unknown or ambiguous mesh name, slot out of range, duplicate row, a Mesh::slot not one per face.
@@ -84,10 +84,11 @@ bool npy_write_header(std::FILE* f, size_t rows, size_t cols, const char* descr)
 struct Gpu;
 Gpu* gpu_init(std::string& err);
 void gpu_destroy(Gpu* g);
-// GAS, compacted, inputs freed (t.slot < slots.size()). When a slot transmits (tau > 0): one SBT record per slot
-// (within the device's records per GAS), any-hit on the transmitting ones; else one opaque record, the layout of an
-// all-opaque scene. Geometry flags are fixed at build: a slot that starts or stops transmitting rebuilds.
-bool gpu_build(Gpu& g, const Tris& t, const std::vector<Slot>& slots, std::string& err);
+// GAS, compacted, inputs freed (t.slot < slots.size()). When a slot transmits (tau > 0) or perSlot is set (the bounce
+// pass reads each slot's rho): one SBT record per slot (within the device's records per GAS), any-hit on the
+// transmitting ones; else one record, the layout of an all-opaque scene. Geometry flags are fixed at build: a slot that
+// starts or stops transmitting rebuilds.
+bool gpu_build(Gpu& g, const Tris& t, const std::vector<Slot>& slots, std::string& err, bool perSlot = false);
 bool gpu_set_slots(Gpu& g, const std::vector<Slot>& slots, std::string& err);   // hit records (every run; same count as the build)
 // A built acceleration structure moved out of the Gpu, kept in VRAM for a later run of the same scene.
 struct GasSlot { void* dGas = nullptr; unsigned long long gas = 0; size_t bytes = 0; };
@@ -116,14 +117,28 @@ struct SeriesIn {
   const int* sunStep = nullptr;    // [nSun] step (column) index per sun direction
   const float3* sunVec = nullptr;  // [nSun]
   const float* sunW = nullptr;     // [nSun] DNI (W/m2) or direct illuminance (lux) per sun direction
+  const float* Sdc = nullptr;      // [(P+1) x T] radiance per gpu_bounce bin and step (host); null = no reflected light
 };
-// E[i*T + t] (host, nc x T floats) for the current chunk: sum_sky T*max(0,cos)*wsky*S[row,t] + G*g[t] + sun term.
+// E[i*T + t] (host, nc x T floats) for the current chunk: sum_sky T*max(0,cos)*wsky*S[row,t] + G*g[t] + sun term
+// [+ sum_b dc(b, i) * Sdc[b,t], the chunk's gpu_bounce rows].
 bool gpu_series(Gpu& g, size_t nc, const SeriesIn& in, float* E, std::string& err);
+// Reflected light of sensors [i0, i0+nc): M paths per sensor with up to N diffuse reflections (trace_dev.cu
+// __raygen__bounce), binned by where they escape into rows dc(b, i) that stay on device (bin b = 0 ground, 1..P the
+// Reinhart patches of mf in gendaymtx order, true north = the model's turned by -north; weight pi / M per path, so
+// sum_b dc(b, i) L_b is the reflected irradiance under bin radiances L). Sub-launches over sample ranges of the whole
+// chunk, TDR-safe like gpu_trace's byte mode (2^13 paths first, 1 to 64 samples per sensor, then ~100 ms, at most
+// doubling); cancel is checked between them.
+struct Bounce { unsigned N = 1, M = 1024; int mf = 1; double north = 0; const std::atomic<bool>* cancel = nullptr; };
+bool gpu_bounce(Gpu& g, size_t i0, size_t nc, unsigned rayFlags, const Bounce& b, std::string& err);
+bool gpu_reduce_dc(Gpu& g, size_t nc, const float* W, double* out, std::string& err);   // out[i] = sum_b dc(b, i) * W[b], double
+bool gpu_download_dc(Gpu& g, size_t nc, std::vector<float>& out, std::string& err);    // [(P+1) x nc] as on device
 bool gpu_download_bits(Gpu& g, size_t nc, std::vector<uint32_t>& out, std::string& err);   // [nWords x nc] as on device
 bool gpu_download_bytes(Gpu& g, size_t nc, std::vector<uint8_t>& out, std::string& err);   // byte mode: [nDir x nc]
-struct GpuStats { double buildMs = 0, traceMs = 0; size_t rays = 0, gasBytes = 0, launches = 0; };
+struct GpuStats { double buildMs = 0, traceMs = 0, bounceMs = 0; size_t rays = 0, gasBytes = 0, launches = 0, paths = 0, bounceLaunches = 0; };
 GpuStats gpu_stats(const Gpu& g);
 // TERMINATE_ON_FIRST_HIT [| CULL_BACK_FACING_TRIANGLES], | DISABLE_ANYHIT unless a slot transmits (translucent)
 unsigned gpu_ray_flags(bool cullBackfaces, bool translucent);
+// The bounce pass's closest hits: DISABLE_ANYHIT [| CULL_BACK_FACING_TRIANGLES] (it handles translucent slots itself)
+unsigned gpu_bounce_flags(bool cullBackfaces);
 
 }  // namespace daylight

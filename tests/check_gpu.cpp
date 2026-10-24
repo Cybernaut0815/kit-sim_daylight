@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // GPU module checks: hand-coded ground + box scene, hemisphere cull, Waechter-Binder offset, reduce / series
 // against CPU loops over the downloaded bits or transmittance bytes, adaptive sub-launches, the Radiance glass port,
-// and run() end to end with optics (slots, thin solids, culling, residency, the dump). Self-skips without a CUDA device.
+// the reflected-light pass against closed forms (bins, events, chunks), and run() end to end with optics (slots, thin
+// solids, culling, residency, the dump) and bounces. Self-skips without a CUDA device.
 #include "glass.h"
 #include "internal.h"
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -316,6 +318,160 @@ int check_gpu(const char* testsDir) {
     CHECK(gb == std::vector<uint8_t>(5, 163));   // 0.64 x 255 = 163.2 at every angle
   }
 
+  // reflected light (gpu_bounce): a sensor's row holds its coefficient per bin (0 ground, 1 + p the MF 1 patches,
+  // gendaymtx order), pi / M per path, so a row without random events sums to pi x the weight of the reflected paths
+  {
+    CHECK(gpu_bounce_flags(false) == 1u && gpu_bounce_flags(true) == 17u);   // DISABLE_ANYHIT (1) | CULL_BACK_FACING_TRIANGLES (16)
+    const Patches pa = make_patches(1);
+    const size_t nb = size_t(pa.P) + 1;
+    std::vector<float> dc;   // the last bounce's rows [nb x n]
+    const auto bounce = [&](const Tris& tr, const std::vector<Slot>& sl, const Sensors& se, unsigned N, unsigned M, double north = 0, size_t i0 = 0) {
+      Bounce b; b.N = N; b.M = M; b.north = north;
+      const size_t n = se.p.size() - i0;
+      const bool ok = gpu_build(*g, tr, sl, err, true) && gpu_set_slots(*g, sl, err) && gpu_set_scene(*g, se, D, err) &&
+                      gpu_bounce(*g, i0, n, gpu_bounce_flags(false), b, err) && gpu_download_dc(*g, n, dc, err) && dc.size() == nb * n;
+      CHECK(ok);
+      return ok;
+    };
+    // a 2 km plane (rho 0.5): sensors looking down 1 m and 1 cm above it reflect every path once, deterministically, the
+    // reflections spread over the patch rows as cos^2 says (5 sigma); one looking up sees nothing reflected
+    Tris plane;
+    quad(plane, f3(-1000, -1000, 0), f3(1000, -1000, 0), f3(1000, 1000, 0), f3(-1000, 1000, 0));
+    Slot half; half.rho = 0.5f;
+    Sensors sa;
+    sa.p = {f3(0, 0, 1), f3(3, 0, 0.01), f3(0, 0, 1)};
+    sa.n = {f3(0, 0, -1), f3(0, 0, -1), f3(0, 0, 1)};
+    const unsigned M = 65536;
+    if (bounce(plane, {half}, sa, 1, M)) {
+      const std::vector<float> rows3 = dc;
+      for (size_t i = 0; i < 2; ++i) {
+        double sum = 0;
+        for (size_t b = 0; b < nb; ++b) sum += dc[b * 3 + i];
+        CHECK(std::fabs(sum / (0.5 * kPi) - 1) <= 1e-4 && dc[i] == 0);
+      }
+      for (int r = 0; r <= 7; ++r) {   // row r covers altitudes [r alpha, (r + 1) alpha), the zenith cap 7 alpha .. 90 deg
+        double c = 0;
+        for (size_t p = 0; p < size_t(pa.P); ++p) if (pa.row[p] == r) c += dc[(p + 1) * 3];
+        const double s0 = std::sin(pa.alpha * r), s1 = r == 7 ? 1.0 : std::sin(pa.alpha * (r + 1)), q = s1 * s1 - s0 * s0;
+        CHECK(std::fabs(c - 0.5 * kPi * q) <= 5 * 0.5 * kPi * std::sqrt(q * (1 - q) / M));
+      }
+      double open = 0;
+      for (size_t b = 0; b < nb; ++b) open += dc[b * 3 + 2];
+      CHECK(open == 0);
+      // a chunk at i0 = 1 gives the same rows: seeds from the global sensor index, sums in sample order, whatever the launches
+      if (bounce(plane, {half}, sa, 1, M, 0, 1))
+        for (size_t b = 0; b < nb; ++b) for (size_t i = 0; i < 2; ++i) CHECK(dc[b * 2 + i] == rows3[b * 3 + 1 + i]);
+      // reduce = CPU loop over the rows; the series' reflected part summed over its steps = the reduce of the summed radiances
+      const int T3 = 3;
+      std::vector<float> Sd(nb * T3), Wd(nb, 0.f), zS(nSky * T3, 0.f), zg(T3, 0.f), zG(3, 0.f), E3(3 * T3);
+      for (size_t b = 0; b < nb; ++b)
+        for (int t3 = 0; t3 < T3; ++t3) { Sd[b * T3 + t3] = float(1 + (7 * b + 3 * t3) % 11); Wd[b] += Sd[b * T3 + t3]; }
+      SeriesIn sd;
+      sd.nSky = nSky; sd.row = row.data(); sd.wsky = wsky.data(); sd.S = zS.data(); sd.P = int(nSky); sd.T = T3; sd.g = zg.data(); sd.G = zG.data(); sd.Sdc = Sd.data();
+      std::vector<double> od(3);
+      CHECK(bounce(plane, {half}, sa, 1, 1024) && gpu_trace(*g, 0, 3, flags, err) && gpu_series(*g, 3, sd, E3.data(), err) && gpu_reduce_dc(*g, 3, Wd.data(), od.data(), err));
+      for (size_t i = 0; i < 3 && dc.size() == nb * 3; ++i) {
+        double cpu = 0;
+        for (size_t b = 0; b < nb; ++b) cpu += double(dc[b * 3 + i]) * Wd[b];
+        CHECK(std::fabs(od[i] - cpu) <= 1e-12 * cpu && (i == 2 ? cpu == 0 : cpu > 0));
+        CHECK(std::fabs(double(E3[i * T3]) + E3[i * T3 + 1] + E3[i * T3 + 2] - od[i]) <= 1e-5 * od[i]);
+      }
+    }
+    // a 2 km ceiling (rho 0.4) over a sensor looking up: everything reflected goes down, into the ground bin
+    Tris ceiling;
+    quad(ceiling, f3(-1000, -1000, 1), f3(-1000, 1000, 1), f3(1000, 1000, 1), f3(1000, -1000, 1));
+    Slot c4; c4.rho = 0.4f;
+    Sensors sb; sb.p = {f3(0, 0, 0)}; sb.n = {f3(0, 0, 1)};
+    if (bounce(ceiling, {c4}, sb, 1, 4096)) {
+      double up = 0;
+      for (size_t b = 1; b < nb; ++b) up += dc[b];
+      CHECK(std::fabs(dc[0] / (0.4 * kPi) - 1) <= 1e-4 && up == 0);
+    }
+    // a sensor looking down between a ground (rho_g, z 0) and a porous ceiling (tau, rho_c, z 2), both 200 km wide: light
+    // leaves through the ceiling after an odd number of reflections, sum_sky = pi rho_g tau sum_{k <= (N-1)/2} (rho_c rho_g)^k,
+    // the ground bin stays empty. 64 sensors (independent seeds): their mean within 5 sigma of their spread; N 19 and 20
+    // (high albedo, Russian roulette) finish and agree
+    Tris sw;
+    quad(sw, f3(-1e5, -1e5, 0), f3(1e5, -1e5, 0), f3(1e5, 1e5, 0), f3(-1e5, 1e5, 0), 0);
+    quad(sw, f3(-1e5, -1e5, 2), f3(1e5, -1e5, 2), f3(1e5, 1e5, 2), f3(-1e5, 1e5, 2), 1);
+    Sensors sc;
+    for (int k = 0; k < 64; ++k) { sc.p.push_back(f3(0.1 * k, 0, 1)); sc.n.push_back(f3(0, 0, -1)); }
+    const struct { float rg, rc, tau; unsigned N; } cases[] = {{0.5f, 0.4f, 0.5f, 1}, {0.5f, 0.4f, 0.5f, 2}, {0.5f, 0.4f, 0.5f, 3},
+                                                               {0.9f, 0.9f, 0.1f, 19}, {0.9f, 0.9f, 0.1f, 20}};
+    double m19 = 0, s19 = 0;
+    for (const auto& cs : cases) {
+      std::vector<Slot> sl(2);
+      sl[0].rho = cs.rg; sl[1].rho = cs.rc; sl[1].tau = cs.tau;
+      const auto t0 = std::chrono::steady_clock::now();
+      if (!bounce(sw, sl, sc, cs.N, 4096)) continue;
+      const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      double expect = 0, f = 1, mean = 0, var = 0, gnd = 0;
+      for (unsigned k = 0; 2 * k + 1 <= cs.N; ++k, f *= double(cs.rc) * cs.rg) expect += f;
+      expect *= kPi * cs.rg * cs.tau;
+      std::vector<double> up(64, 0.0);
+      for (size_t i = 0; i < 64; ++i) {
+        for (size_t b = 1; b < nb; ++b) up[i] += dc[b * 64 + i];
+        gnd += dc[i]; mean += up[i] / 64;
+      }
+      for (double x : up) var += (x - mean) * (x - mean) / 63;
+      const double sigma = std::sqrt(var / 64);
+      CHECK(gnd == 0 && std::fabs(mean - expect) <= 5 * sigma + 1e-4 * expect);
+      if (cs.N == 19) { m19 = mean; s19 = sigma; }
+      if (cs.N == 20) CHECK(std::fabs(mean - m19) <= 5 * std::sqrt(sigma * sigma + s19 * s19));
+      std::printf("gpu: bounce sandwich N %u: %.5f (expected %.5f, sigma %.5f), %.0f ms\n", cs.N, mean, expect, sigma, ms);
+    }
+    // glass (tau 0.64) over a ground (rho 0.5), sensors under it: a single sheet and a 1 cm pane box (thin solid, entry face
+    // = the sheet) give equal rows, the exit face being no event; --fresnel off (no kSlotGlass): no mirror, every path is
+    // transmit-only, nothing counts
+    {
+      Tris sheet, box;
+      const double a0 = -1000, a1 = 1000, z0 = 1, z1 = 1.01;   // 2 km: no path from near the sensors clips the 1 cm edges
+      for (Tris* tr : {&sheet, &box}) {
+        quad(*tr, f3(-1e4, -1e4, 0), f3(1e4, -1e4, 0), f3(1e4, 1e4, 0), f3(-1e4, 1e4, 0), 0);
+        quad(*tr, f3(a0, a0, z0), f3(a0, a1, z0), f3(a1, a1, z0), f3(a1, a0, z0), 1);   // bottom (-z)
+      }
+      quad(box, f3(a0, a0, z1), f3(a1, a0, z1), f3(a1, a1, z1), f3(a0, a1, z1), 1);   // top, then the sides, outward
+      quad(box, f3(a0, a0, z0), f3(a0, a0, z1), f3(a0, a1, z1), f3(a0, a1, z0), 1);
+      quad(box, f3(a1, a0, z0), f3(a1, a1, z0), f3(a1, a1, z1), f3(a1, a0, z1), 1);
+      quad(box, f3(a0, a0, z0), f3(a1, a0, z0), f3(a1, a0, z1), f3(a0, a0, z1), 1);
+      quad(box, f3(a0, a1, z0), f3(a0, a1, z1), f3(a1, a1, z1), f3(a1, a1, z0), 1);
+      std::vector<Slot> sl(2);
+      sl[0].rho = 0.5f; sl[1].rho = 0; sl[1].tau = 0.64f; sl[1].tn = float(tn_from_Tn(0.64)); sl[1].flags = kSlotGlass;
+      Sensors sg;
+      sg.p = {f3(0, 0, 0.5), f3(3, -2, 0.2), f3(-5, 4, 0.9)};
+      sg.n = {f3(0, 0, 1), f3(0, 0, 1), f3(0, 0, 1)};
+      std::vector<float> rowsSheet;
+      double sum = 0;
+      if (bounce(sheet, sl, sg, 2, 4096)) { rowsSheet = dc; for (float x : dc) sum += x; }
+      sl[1].flags = kSlotGlass | kSlotThin;
+      CHECK(bounce(box, sl, sg, 2, 4096) && dc == rowsSheet && sum > 0.05);
+      sl[1].flags = 0;
+      CHECK(bounce(sheet, sl, sg, 2, 4096) && dc == std::vector<float>(nb * 3, 0.f));
+      std::printf("gpu: bounce under glass: %.4f per sensor (pi R rho_g T)\n", sum / 3);
+    }
+    // a black wall (rho 0) 1 m east of a sensor looking down 1 cm over a ground (rho 0.5): no reflected light reaches a
+    // patch east of it below 72 deg, some reaches every patch west of it; --north 90 turns that east to true south
+    {
+      Tris tw;
+      quad(tw, f3(-1000, -1000, 0), f3(1000, -1000, 0), f3(1000, 1000, 0), f3(-1000, 1000, 0), 0);
+      quad(tw, f3(1, -1000, 0), f3(1, -1000, 1000), f3(1, 1000, 1000), f3(1, 1000, 0), 1);
+      std::vector<Slot> sl(2);
+      sl[0].rho = 0.5f; sl[1].rho = 0;
+      Sensors st; st.p = {f3(0, 0, 0.01)}; st.n = {f3(0, 0, -1)};
+      for (double north : {0.0, 90.0}) {
+        if (!bounce(tw, sl, st, 1, 16384, north)) continue;
+        int dark = 0, lit = 0, wrong = 0;
+        for (size_t p = 0; p < size_t(pa.P); ++p) {
+          if (pa.row[p] > 5) continue;
+          const double az = std::fmod(pa.azi[p] * 180 / kPi - north + 720, 360);   // the patch's azimuth in the model
+          if (az >= 30 && az <= 150) { ++dark; wrong += dc[p + 1] != 0; }
+          if (az >= 210 && az <= 330) { ++lit; wrong += !(dc[p + 1] > 0); }
+        }
+        CHECK(dark > 30 && lit > 30 && wrong == 0);
+      }
+    }
+  }
+
   // empty scene: traversable 0 = every hemisphere direction visible
   CHECK(gpu_build(*g, Tris{}, {}, err) && gpu_set_slots(*g, {Slot{}}, err));
   CHECK(gpu_set_scene(*g, s, D, err));
@@ -503,6 +659,61 @@ int check_gpu(const char* testsDir) {
     k1.sceneKey.clear(); r = sun(lid, k1);
     CHECK(!r.sceneReused); r = sun(lid, k1);
     CHECK(!r.sceneReused && r.values == std::vector<double>({b255(64)}));
+
+    // reflected light end to end (June, clear sky, sensors 1 m up, not blocking): a face looking down over a ground mesh
+    // with one bounce gets about what the virtual ground gives it without the mesh; one looking up gets nothing reflected;
+    // direct and sun hours stay; the series sums to the cumulative value. Ground halves of rho 0.3 / 0.1 read their own
+    // slot (one record would give 0.3 or 0.1 everywhere), and the per-slot layout keys a resident scene of its own
+    Weather cs;
+    CHECK(clear_sky_weather(42.35, -71.07, -5, 3, 0, cs, e2));
+    const auto go = [&](const std::vector<Mesh>& ms, const Options& op) {
+      Result rr; std::string e;
+      if (!run(ms, &cs, op, rr, e)) { std::printf("run: %s\n", e.c_str()); ++failures; }
+      return rr;
+    };
+    Mesh s2; s2.name = "s2";
+    s2.points = {-0.5, -0.5, 1, 0.5, -0.5, 1, 0.5, 0.5, 1, -0.5, 0.5, 1, -0.5, 4.5, 1, 0.5, 4.5, 1, 0.5, 5.5, 1, -0.5, 5.5, 1};
+    s2.counts = {4, 4}; s2.indices = {3, 2, 1, 0, 4, 5, 6, 7};   // face 0 looks down at (0, 0, 1), face 1 up at (0, 5, 1)
+    const std::vector<Mesh> halves{s2, squares("east", false, 0, 500, {500}), squares("west", false, 0, 500, {-500})};
+    Options ob;
+    ob.quantities = {Quantity::Radiation, Quantity::Direct, Quantity::SunHours};
+    ob.selfOcclude = false; ob.bounceSamples = 65536;
+    CHECK(parse_hoy("06-01T00:00", false, ob.t0, e2) && parse_hoy("07-01T00:00", false, ob.t1, e2));
+    const Result virt = go({s2}, ob);   // no ground mesh: the virtual ground (rho 0.2)
+    ob.bounces = 1; ob.seriesPath = std::string(testsDir) + "/_check_gpu_series.npy";
+    const Result mesh = go(halves, ob);   // ground mesh of the default rho 0.2: one hit record
+    CHECK(virt.values.size() == 6 && mesh.values.size() == 6);
+    if (virt.values.size() == 6 && mesh.values.size() == 6) {
+      CHECK(std::fabs(mesh.values[0] / virt.values[0] - 1) <= 0.03 && mesh.values[1] == 0 && mesh.values[2] == 0);
+      CHECK(std::vector<double>(mesh.values.begin() + 3, mesh.values.end()) == std::vector<double>(virt.values.begin() + 3, virt.values.end()));
+      std::printf("run: face looking down, June: ground mesh + 1 bounce %.3f kWh/m2, virtual ground %.3f\n", mesh.values[0], virt.values[0]);
+      CHECK(npy(ob.seriesPath, head, data) && data.size() % 8 == 0);
+      const size_t tup = data.size() / 8;   // float32 [2 x Tup], W/m2 at 1 h steps
+      for (size_t e = 0; e < 2 && tup; ++e) {
+        double kwh = 0;
+        for (size_t j = 0; j < tup; ++j) { float x; std::memcpy(&x, &data[4 * (e * tup + j)], 4); kwh += x / 1000.0; }
+        CHECK(std::fabs(kwh / mesh.values[3 * e] - 1) <= 1e-5);
+      }
+    }
+    std::remove(ob.seriesPath.c_str());
+    std::remove((ob.seriesPath + ".hoys.txt").c_str());
+    Options hk = ob; hk.seriesPath.clear(); hk.sceneKey = "halves";
+    hk.optics = {{"east", -1, 0.3, 0, false}, {"west", -1, 0.1, 0, false}};
+    const Result h1 = go(halves, hk);
+    hk.optics = {{"east", -1, 0.1, 0, false}, {"west", -1, 0.3, 0, false}};
+    const Result h2 = go(halves, hk);
+    hk.bounces = 0;
+    const Result h3 = go(halves, hk);
+    hk.bounces = 1; hk.optics = {{"*", -1, 0.2, 0, false}};
+    const Result h4 = go(halves, hk);
+    CHECK(h1.values.size() == 6 && h2.values.size() == 6 && h3.values.size() == 6 && mesh.values.size() == 6);
+    if (h1.values.size() == 6 && h2.values.size() == 6 && h3.values.size() == 6 && mesh.values.size() == 6) {
+      CHECK(!h1.sceneReused && std::fabs(h1.values[0] / mesh.values[0] - 1) <= 0.03);
+      CHECK(h2.sceneReused && std::fabs(h2.values[0] / mesh.values[0] - 1) <= 0.03);
+      CHECK(!h3.sceneReused && h3.values[0] == 0);   // bounces 0: the one-record layout, another scene
+      CHECK(h4.sceneReused && h4.values == mesh.values);   // one rho again: h3's scene, its one record at 0.2
+      std::printf("run: ground halves 0.3 / 0.1 and 0.1 / 0.3: %.3f, %.3f (all 0.2: %.3f)\n", h1.values[0], h2.values[0], mesh.values[0]);
+    }
   }
   return failures;
 }

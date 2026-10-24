@@ -47,8 +47,9 @@ inline constexpr const char* kQuantityNames[] = {"radiation", "direct", "diffuse
 enum class Sides { Front, Back, Both };
 
 // One --optics row: broadband optics of mesh `mesh` ("*" = every mesh), or of its face slot `slot` (>= 0). rho = diffuse
-// reflectance, tau = transmittance at normal incidence (rho + tau <= 1); glass: Radiance glass (n 1.52, rho 0,
-// 0 < tau <= 0.918), else porous (tau at every angle; opaque when tau = 0). Precedence NAME/SLOT > NAME > * > rho 0.2 tau 0.
+// reflectance (used by bounces), tau = transmittance at normal incidence (rho + tau <= 1); glass: Radiance glass (n 1.52,
+// rho 0, 0 < tau <= 0.918), else porous (tau at every angle; opaque when tau = 0). Precedence NAME/SLOT > NAME > * > rho
+// 0.2 tau 0.
 struct Optics { std::string mesh; int slot = -1; double rho = 0.2, tau = 0; bool glass = false; };
 
 struct Options {
@@ -64,6 +65,8 @@ struct Options {
   std::vector<Optics> optics;         // per mesh / face slot (--optics); names = Mesh::name
   bool transmission = false;          // tau lets light through glass / porous slots; false = every slot opaque (as before)
   bool fresnel = true;                // glass by angle; false = glass passes tau at every angle
+  int bounces = 0;                    // reflected light: diffuse reflections per path, 0..20 (0 = none, as before; physical mode)
+  int bounceSamples = 1024;           // paths per sensor for it, 64..65536
   double north = 0;                   // degrees, counterclockwise from +Y (ladybug convention; 90 = west)
   double offset = 0;                  // sensor offset along the normal, metres
   double lat = NAN, lon = NAN, tz = NAN;        // override EPW header / no-EPW runs
@@ -74,8 +77,9 @@ struct Options {
   std::string dumpBitsPath, dumpSky, dumpSun;   // validation dumps; empty = off (GPU selection: CUDA_VISIBLE_DEVICES)
   // Scene identity for long-lived callers (a server). Non-empty and equal to the previous run's key: the occluder
   // triangles and the acceleration structure of that run stay resident and are reused (the caller guarantees the
-  // meshes and selfOcclude are unchanged; optics values may change, the set of transmitting slots is part of the
-  // identity). Empty (the CLI): rebuilt every run. The GPU context is kept either way.
+  // meshes and selfOcclude are unchanged; optics values may change, the set of transmitting slots, and with bounces
+  // whether the slots' rho differ, are part of the identity). Empty (the CLI): rebuilt every run. The GPU context is
+  // kept either way.
   std::string sceneKey;
   int residentScenes = 1;              // keyed scenes kept in VRAM (most recent first); more than 1 lets users alternate cheaply
   const std::atomic<bool>* cancel = nullptr;   // set by another thread: run() stops at its next check and fails with "cancelled"
