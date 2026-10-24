@@ -2,6 +2,7 @@
 // Internal contracts between the translation units. Not part of the public API.
 #pragma once
 #include "daylight.h"
+#include "params.h"         // Slot
 #include <cstdio>
 #include <vector_types.h>   // float3, uint3 (CUDA toolkit, header-only)
 
@@ -52,23 +53,42 @@ double extraterrestrial_irradiance(int doy);   // Spencer 1971, W/m2 (pvlib get_
 void ineichen(double apparentZenithDeg, double turbidity, double altitudeM, double dniExtra, double& ghi, double& dni, double& dhi);
 
 // ------------------------------------------------------------------ mesh.cpp
-struct Tris { std::vector<float3> v; std::vector<uint3> i; };
+struct Tris { std::vector<float3> v; std::vector<uint3> i; std::vector<uint32_t> slot; };   // slot: global slot per triangle
 struct Sensors { std::vector<float3> p, n; };              // recentred, offset applied; sides already expanded
 void bbox_centre(const std::vector<Mesh>& meshes, double c[3]);
-// Append the triangulated faces of m (recentred by c) to out; skipped counts degenerate / < 3-vertex faces.
-void triangulate(const Mesh& m, const double c[3], Tris& out, int& skipped);
+// Append the triangulated faces of m (recentred by c) to out, each triangle's global slot = slotBase + its face slot;
+// skipped counts degenerate / < 3-vertex faces.
+void triangulate(const Mesh& m, const double c[3], Tris& out, int& skipped, uint32_t slotBase = 0);
+// Global slots: every mesh in input order takes slot_count(m) = max face slot + 1 (1 without slots); mesh base = the sum
+// over the meshes before it.
+size_t slot_count(const Mesh& m);
+// Optics rows within range (0..1, rho + tau <= 1; glass rho 0, 0 < tau <= 0.918) and the mode rules (ladybug: no
+// transmission). False + err naming the first bad row.
+bool optics_ok(const Options& opt, std::string& err);
+// One Slot per global slot from the rows (NAME/SLOT > NAME > * > rho 0.2 tau 0; glass: tn_from_Tn(tau), kSlotGlass).
+// Errors: unknown or ambiguous mesh name, slot out of range, duplicate row, a Mesh::slot not one per face.
+bool resolve_optics(const std::vector<Mesh>& meshes, const std::vector<Optics>& rows, std::vector<Slot>& out, std::string& err);
+// Faces of slot s in m (recentred by c) as one closed thin solid: positions welded on a 1e-5 m grid, every edge used
+// as often in each direction (closed, consistently wound), 2 |V| / S < 0.1 m -> kSlotThin, | kSlotInward when the signed
+// volume is negative; else 0. ponytail: per slot, not per connected component (a pane box sharing its slot with an open
+// sheet is not thin, so it passes tau twice); split the slot's faces into components if such slots matter.
+unsigned thin_solid(const Mesh& m, unsigned s, const double c[3]);
 // Sensor points/normals per face or per point per opt (mode rules, offset, sides). Appends to out: one entry per
 // element, or two consecutive entries (front, back) when sides == Both. Returns the element count (faces or points).
 size_t make_sensors(const Mesh& m, const Options& opt, const double c[3], Sensors& out, std::string& warn);
 
 // ------------------------------------------------------------------ run.cpp
-bool npy_write_header(std::FILE* f, size_t rows, size_t cols, const char* descr);   // .npy v1.0 [rows x cols] C order, descr "<f8" / "<f4" / "<u4"
+bool npy_write_header(std::FILE* f, size_t rows, size_t cols, const char* descr);   // .npy v1.0 [rows x cols] C order, descr "<f8" / "<f4" / "<u4" / "<u1"
 
 // ------------------------------------------------------------------ gpu.cu
 struct Gpu;
 Gpu* gpu_init(std::string& err);
 void gpu_destroy(Gpu* g);
-bool gpu_build(Gpu& g, const Tris& t, std::string& err);                                   // GAS, compacted; inputs freed
+// GAS, compacted, inputs freed (t.slot < slots.size()). When a slot transmits (tau > 0): one SBT record per slot
+// (within the device's records per GAS), any-hit on the transmitting ones; else one opaque record, the layout of an
+// all-opaque scene. Geometry flags are fixed at build: a slot that starts or stops transmitting rebuilds.
+bool gpu_build(Gpu& g, const Tris& t, const std::vector<Slot>& slots, std::string& err);
+bool gpu_set_slots(Gpu& g, const std::vector<Slot>& slots, std::string& err);   // hit records (every run; same count as the build)
 // A built acceleration structure moved out of the Gpu, kept in VRAM for a later run of the same scene.
 struct GasSlot { void* dGas = nullptr; unsigned long long gas = 0; size_t bytes = 0; };
 GasSlot gpu_detach(Gpu& g);              // the current GAS moves out; the Gpu then has none
@@ -76,10 +96,12 @@ void gpu_attach(Gpu& g, GasSlot s);      // frees the current GAS and installs s
 void gpu_free(GasSlot& s);
 size_t gpu_free_bytes();                 // free device memory (cudaMemGetInfo), 0 on error
 bool gpu_set_scene(Gpu& g, const Sensors& s, const std::vector<float3>& dirs, std::string& err);   // resident sensors + directions
-// Trace sensors [i0, i0+nc) against all directions; bits stay on device, word-major bits[w*nc + i].
-// Adaptive TDR-safe sub-launches inside (first 4096 sensors timed, then scaled to ~150 ms per launch).
+// Trace sensors [i0, i0+nc) against all directions; bits stay on device, word-major bits[w*nc + i]. Ray flags with
+// any-hit on (gpu_ray_flags(.., true)): transmittance bytes[d*nc + i] instead (x255, 255 = 1), which reduce / series
+// then weight by. Adaptive TDR-safe sub-launches inside (first 4096 sensors timed, then scaled to ~150 ms per launch).
 bool gpu_trace(Gpu& g, size_t i0, size_t nc, unsigned rayFlags, std::string& err);
-// out[i] = sum_d bit(i,d) * (useCos ? max(0, N_i . D_d) : 1) * W[d], double accumulation; W has nDir host floats.
+// out[i] = sum_d T(i,d) * (useCos ? max(0, N_i . D_d) : 1) * W[d], double accumulation; W has nDir host floats.
+// T = the bit, or byte / 255.
 bool gpu_reduce(Gpu& g, size_t nc, const float* W, bool useCos, double* out, std::string& err);
 struct SeriesIn {
   unsigned nSky = 0;          // sky directions are 0..nSky-1
@@ -94,11 +116,13 @@ struct SeriesIn {
   const float3* sunVec = nullptr;  // [nSun]
   const float* sunW = nullptr;     // [nSun] DNI (W/m2) or direct illuminance (lux) per sun direction
 };
-// E[i*T + t] (host, nc x T floats) for the current chunk: sum_sky bit*max(0,cos)*wsky*S[row,t] + G*g[t] + sun term.
+// E[i*T + t] (host, nc x T floats) for the current chunk: sum_sky T*max(0,cos)*wsky*S[row,t] + G*g[t] + sun term.
 bool gpu_series(Gpu& g, size_t nc, const SeriesIn& in, float* E, std::string& err);
 bool gpu_download_bits(Gpu& g, size_t nc, std::vector<uint32_t>& out, std::string& err);   // [nWords x nc] as on device
+bool gpu_download_bytes(Gpu& g, size_t nc, std::vector<uint8_t>& out, std::string& err);   // byte mode: [nDir x nc]
 struct GpuStats { double buildMs = 0, traceMs = 0; size_t rays = 0, gasBytes = 0, launches = 0; };
 GpuStats gpu_stats(const Gpu& g);
-unsigned gpu_ray_flags(bool cullBackfaces);
+// TERMINATE_ON_FIRST_HIT [| CULL_BACK_FACING_TRIANGLES], | DISABLE_ANYHIT unless a slot transmits (translucent)
+unsigned gpu_ray_flags(bool cullBackfaces, bool translucent);
 
 }  // namespace daylight

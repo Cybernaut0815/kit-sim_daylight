@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +31,10 @@ const char* const kUsage =
     "  --time [YYYY-]MM-DDTHH:MM | --from TS --to TS [--step MIN]   default: annual over the EPW rows\n"
     "  --hours HH:MM-HH:MM      with --from/--to: only these hours of every day (analysis period)\n"
     "  --sky-density 1|2|4  --patch-samples K  --ground RHO  --north DEG  --offset M  --no-self-occlude\n"
+    "  --optics SPEC[;SPEC...]  NAME[/SLOT]=RHO[,TAU[,glass|porous]] per mesh / face slot, * = every mesh (repeatable;\n"
+    "                           default rho 0.2, tau 0)\n"
+    "  --transmission off|on    light through glass / porous slots (default off: every surface opaque)\n"
+    "  --fresnel on|off         glass transmittance by angle (default on; off: tau at every angle)\n"
     "  --out FILE[.npy]         values (text rows, or float64 [N x C] NumPy when .npy) + FILE.json manifest\n"
     "  --timeseries FILE.npy  --dump-bits FILE.npy  --dump-sky FILE  --dump-sun FILE\n"
     "  --bench [NSENS NTRIS]  -v          exit code: 1 usage, 2 runtime error\n";
@@ -44,6 +49,44 @@ bool parse_quantities(const std::string& s, std::vector<Quantity>& out) {
     while (q < std::size(kQuantityNames) && s.compare(b, e - b, kQuantityNames[q])) ++q;
     if (q == std::size(kQuantityNames)) return false;
     out.push_back(static_cast<Quantity>(q));
+  }
+  return true;
+}
+
+// SPEC[;SPEC...], SPEC = NAME[/SLOT]=RHO[,TAU[,glass|porous]]: split at the last '=', /SLOT only as a trailing '/' + digits
+// (Facade/East is a name), kind porous when TAU > 0 unless given. Ranges are optics_ok's.
+// ponytail: names containing ';' cannot be addressed (app mesh names are ids)
+bool parse_optics(const std::string& s, std::vector<Optics>& out, std::string& err) {
+  for (size_t b = 0, e; b <= s.size(); b = e + 1) {
+    e = std::min(s.find(';', b), s.size());
+    const std::string spec = s.substr(b, e - b);
+    const auto bad = [&](const std::string& what) { err = "--optics " + spec + ": " + what; return false; };
+    const size_t eq = spec.rfind('=');
+    if (eq == std::string::npos || eq == 0) return bad("NAME[/SLOT]=RHO[,TAU[,glass|porous]]");
+    Optics o;
+    o.mesh = spec.substr(0, eq);
+    const size_t sl = o.mesh.rfind('/');
+    if (sl != std::string::npos && sl + 1 < o.mesh.size() && o.mesh.find_first_not_of("0123456789", sl + 1) == std::string::npos) {
+      unsigned long v = 0;
+      const auto r = std::from_chars(o.mesh.data() + sl + 1, o.mesh.data() + o.mesh.size(), v);
+      if (r.ec != std::errc() || v > 65535) return bad("SLOT 0..65535");
+      o.slot = int(v);
+      o.mesh.resize(sl);
+      if (o.mesh.empty() || o.mesh == "*") return bad("/SLOT needs a mesh NAME");
+    }
+    std::vector<std::string> v;   // RHO [TAU [kind]]
+    for (size_t f = eq + 1, c; f <= spec.size(); f = c + 1) { c = std::min(spec.find(',', f), spec.size()); v.push_back(spec.substr(f, c - f)); }
+    if (v.size() > 3) return bad("NAME[/SLOT]=RHO[,TAU[,glass|porous]]");
+    double x[2] = {0, 0};
+    for (size_t k = 0; k < v.size() && k < 2; ++k) {
+      char* end = nullptr;
+      x[k] = std::strtod(v[k].c_str(), &end);
+      if (v[k].empty() || *end) return bad("bad number '" + v[k] + "'");
+    }
+    if (v.size() == 3 && v[2] != "glass" && v[2] != "porous") return bad("kind glass or porous");
+    o.rho = x[0]; o.tau = x[1];
+    o.glass = v.size() == 3 && v[2] == "glass";   // porous by default (opaque when TAU = 0)
+    out.push_back(o);
   }
   return true;
 }
@@ -90,6 +133,9 @@ int parse(int argc, char** argv, Args& a, std::string& err) {
     else if (f == "--sky-density") { if (!(v = need(i, "--sky-density"))) return 1; a.opt.mf = std::atoi(v); }
     else if (f == "--patch-samples") { if (!(v = need(i, "--patch-samples"))) return 1; a.opt.patchSamples = std::atoi(v); }
     else if (f == "--ground") { if (!(v = need(i, "--ground"))) return 1; a.opt.ground = std::atof(v); }
+    else if (f == "--optics") { if (!(v = need(i, "--optics"))) return 1; if (!parse_optics(v, a.opt.optics, err)) return 1; }
+    else if (f == "--transmission") { if (!(v = need(i, "--transmission"))) return 1; if (!std::strcmp(v, "on")) a.opt.transmission = true; else if (!std::strcmp(v, "off")) a.opt.transmission = false; else { err = "--transmission off|on"; return 1; } }
+    else if (f == "--fresnel") { if (!(v = need(i, "--fresnel"))) return 1; if (!std::strcmp(v, "on")) a.opt.fresnel = true; else if (!std::strcmp(v, "off")) a.opt.fresnel = false; else { err = "--fresnel on|off"; return 1; } }
     else if (f == "--north") { if (!(v = need(i, "--north"))) return 1; a.opt.north = std::atof(v); }
     else if (f == "--offset") { if (!(v = need(i, "--offset"))) return 1; a.opt.offset = std::atof(v); }
     else if (f == "--out") { if (!(v = need(i, "--out"))) return 1; a.out = v; }
@@ -107,7 +153,7 @@ int parse(int argc, char** argv, Args& a, std::string& err) {
     else if (f.size() > 1 && f[0] == '-' && !std::isdigit(static_cast<unsigned char>(f[1]))) { err = "unknown flag " + f; return 1; }
     else a.sensors.push_back(f);
   }
-  return 0;
+  return optics_ok(a.opt, err) ? 0 : 1;
 }
 
 int prepare(Args& a, Weather& weather, bool& haveWeather, std::string& err) {

@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
-// Checks for mesh.cpp: OBJ / .dmesh readers, triangulation, sensor rules (ladybug / physical), sides, offset.
+// Checks for mesh.cpp: OBJ / .dmesh readers, triangulation, sensor rules (ladybug / physical), sides, offset, optics
+// slots (thin solids, --optics grammar via cli::parse, resolution and its errors).
+#include "cli.h"
+#include "glass.h"
 #include "internal.h"
 #include <cmath>
 #include <cstdio>
@@ -7,6 +10,35 @@
 #include <string>
 
 using namespace daylight;
+
+// Axis box [x0,x1] x [y0,y1] x [z0,z1], 6 outward quads; indexed (8 points) or a soup (4 points per face, as app
+// meshes arrive). Also used by check_gpu.cpp.
+Mesh box_mesh(const char* name, double x0, double y0, double z0, double x1, double y1, double z1, bool soup) {
+  Mesh m; m.name = name;
+  const double X[2] = {x0, x1}, Y[2] = {y0, y1}, Z[2] = {z0, z1};
+  static const int q[6][4] = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {1, 3, 7, 5}, {3, 2, 6, 7}, {2, 0, 4, 6}};   // corner k: bit0 x, bit1 y, bit2 z
+  const auto corner = [&](int k) { m.points.insert(m.points.end(), {X[k & 1], Y[(k >> 1) & 1], Z[k >> 2]}); };
+  for (int k = 0; !soup && k < 8; ++k) corner(k);
+  for (const int* f : q) {
+    m.counts.push_back(4);
+    for (int j = 0; j < 4; ++j) { if (soup) corner(f[j]); m.indices.push_back(soup ? int(m.points.size() / 3) - 1 : f[j]); }
+  }
+  return m;
+}
+static Mesh merged(const Mesh& a, const Mesh& b) {   // b's faces after a's, one mesh
+  Mesh m = a;
+  const int base = int(a.numPoints());
+  m.points.insert(m.points.end(), b.points.begin(), b.points.end());
+  m.counts.insert(m.counts.end(), b.counts.begin(), b.counts.end());
+  for (int i : b.indices) m.indices.push_back(base + i);
+  return m;
+}
+static int parse(std::initializer_list<const char*> args, cli::Args& a, std::string& err) {   // daylight <args>
+  std::vector<char*> argv{const_cast<char*>("daylight")};
+  for (const char* s : args) argv.push_back(const_cast<char*>(s));
+  a = cli::Args{}; err.clear();
+  return cli::parse(int(argv.size()), argv.data(), a, err);
+}
 
 static int failures = 0;
 #define CHECK(cond) do { if (!(cond)) { std::printf("%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); ++failures; } } while (0)
@@ -229,6 +261,117 @@ int check_mesh(const char* testsDir) {
     std::memset(&sb[4], 0, 4); ms.clear();   // flags 0: trailing bytes ignored, as by readers before the slot block
     CHECK(read_dmesh(sb.data(), sb.size(), "upload", ms, err) && ms.size() == 1 && ms[0].slot.empty());
     buf[3] = '9'; err.clear(); CHECK(!read_dmesh(buf.data(), buf.size(), "upload", ms, err) && !err.empty());
+  }
+
+  // --- global slots: triangulate() tags each triangle with mesh base + face slot
+  {
+    Mesh m = polygon({0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0});
+    m.counts = {3, 4}; m.indices = {0, 1, 2, 0, 1, 2, 3}; m.slot = {2, 0};
+    Tris t; int skipped = 0;
+    triangulate(m, zero, t, skipped, 5);
+    CHECK(t.slot == std::vector<uint32_t>({7, 5, 5}) && slot_count(m) == 3);
+    m.slot.clear(); t = Tris{};
+    triangulate(m, zero, t, skipped);
+    CHECK(t.slot == std::vector<uint32_t>({0, 0, 0}) && slot_count(m) == 1);
+  }
+
+  // --- thin solids: a 20 x 20 x 0.01 m pane box, indexed and as a soup (welded), flipped (inward), open, the 3 m cube,
+  //     two touching panes in one slot, a frame (slot 0) sharing the glass box's (slot 1) corners
+  {
+    const Mesh pane = box_mesh("pane", 0, 0, 1, 20, 20, 1.01, false), soup = box_mesh("pane", 0, 0, 1, 20, 20, 1.01, true);
+    CHECK(soup.numPoints() == 24 && pane.numPoints() == 8);
+    CHECK(thin_solid(pane, 0, zero) == kSlotThin && thin_solid(soup, 0, zero) == kSlotThin);
+    const double far[3] = {1e5, -3e5, 50};   // recentring changes nothing
+    CHECK(thin_solid(soup, 0, far) == kSlotThin);
+    Mesh flipped = soup;
+    for (size_t f = 0; f < 6; ++f) std::swap(flipped.indices[4 * f + 1], flipped.indices[4 * f + 3]);
+    CHECK(thin_solid(flipped, 0, zero) == (kSlotThin | kSlotInward));
+    Mesh open = pane; open.counts.pop_back(); open.indices.resize(20);
+    CHECK(thin_solid(open, 0, zero) == 0 && thin_solid(pane, 1, zero) == 0);   // open; a slot without faces
+    Mesh bent = pane; std::swap(bent.indices[1], bent.indices[3]);              // the bottom wound against the others,
+    const double mid[3] = {10, 10, 1.005};                                     // centred so the volume still reads thin
+    CHECK(thin_solid(bent, 0, mid) == 0);
+    CHECK(thin_solid(box_mesh("cube", -1.5, -1.5, 1, 1.5, 1.5, 4, false), 0, zero) == 0);   // closed, 2V/S = 1 m
+    CHECK(thin_solid(merged(box_mesh("a", 0, 0, 0, 1, 1, 0.01, true), box_mesh("b", 1, 0, 0, 2, 1, 0.01, true)), 0, zero) == kSlotThin);
+    Mesh win = box_mesh("window", 0, 0, 0, 1, 1, 0.01, false);   // glass: corners 0..7; frame ring in z = 0 around it
+    win.points.insert(win.points.end(), {-0.1, -0.1, 0, 1.1, -0.1, 0, 1.1, 1.1, 0, -0.1, 1.1, 0});
+    win.counts.insert(win.counts.end(), {4, 4, 4, 4});
+    win.indices.insert(win.indices.end(), {8, 9, 1, 0, 9, 10, 3, 1, 10, 11, 2, 3, 11, 8, 0, 2});
+    win.slot = {1, 1, 1, 1, 1, 1, 0, 0, 0, 0};
+    CHECK(thin_solid(win, 1, zero) == kSlotThin && thin_solid(win, 0, zero) == 0);
+  }
+
+  // --- --optics grammar (cli::parse): split at the last '=', /SLOT only as trailing digits, kind, ';' packing, repeats
+  {
+    cli::Args a;
+    CHECK(parse({"m.obj", "--optics", "Facade/East=0.3", "--optics", "/World/Roof/2=0.1,0.5;a=b=0,0.64,glass;*=0.25;w/=0.2,0.3,porous;x/07=0.4,0"}, a, err) == 0);
+    const std::vector<Optics>& o = a.opt.optics;
+    CHECK(o.size() == 6 && err.empty());
+    if (o.size() == 6) {
+      CHECK(o[0].mesh == "Facade/East" && o[0].slot == -1 && o[0].rho == 0.3 && o[0].tau == 0 && !o[0].glass);
+      CHECK(o[1].mesh == "/World/Roof" && o[1].slot == 2 && o[1].rho == 0.1 && o[1].tau == 0.5 && !o[1].glass);   // porous by default
+      CHECK(o[2].mesh == "a=b" && o[2].slot == -1 && o[2].rho == 0 && o[2].tau == 0.64 && o[2].glass);
+      CHECK(o[3].mesh == "*" && o[3].slot == -1 && o[3].rho == 0.25);
+      CHECK(o[4].mesh == "w/" && o[4].slot == -1 && o[4].tau == 0.3 && !o[4].glass);
+      CHECK(o[5].mesh == "x" && o[5].slot == 7 && o[5].rho == 0.4 && o[5].tau == 0);
+    }
+    CHECK(!a.opt.transmission && a.opt.fresnel);   // defaults
+    CHECK(parse({"m.obj", "--transmission", "on", "--fresnel", "off"}, a, err) == 0 && a.opt.transmission && !a.opt.fresnel);
+    CHECK(parse({"m.obj", "--transmission", "off", "--fresnel", "on"}, a, err) == 0 && !a.opt.transmission && a.opt.fresnel);
+    const char* bad[][2] = {   // every grammar / range / mode error: SPEC, a piece of the message
+        {"wall", "NAME[/SLOT]="}, {"=0.2", "NAME[/SLOT]="}, {"a=0.2;", "NAME[/SLOT]="}, {"a=0.1,0.2,glass,1", "NAME[/SLOT]="},
+        {"*/1=0.2", "/SLOT needs a mesh NAME"}, {"/3=0.2", "/SLOT needs a mesh NAME"}, {"a/65536=0.2", "SLOT 0..65535"},
+        {"a=x", "bad number 'x'"}, {"a=0.2,", "bad number ''"}, {"a=0.2 ", "bad number"}, {"a=0.1,0.2,metal", "kind glass or porous"},
+        {"a=1.2", "0..1"}, {"a=-0.1", "0..1"}, {"a=0.2,1.5", "0..1"}, {"a=nan", "0..1"}, {"a=0.6,0.6", "must not exceed 1"},
+        {"a=0.1,0.5,glass", "RHO must be 0"}, {"a=0,0.95,glass", "(0, 0.918]"}, {"a=0,0,glass", "(0, 0.918]"}};
+    for (const auto& b : bad) {
+      const int rc = parse({"m.obj", "--optics", b[0]}, a, err);
+      CHECK(rc == 1 && err.find(b[1]) != std::string::npos);
+      if (rc != 1 || err.find(b[1]) == std::string::npos) std::printf("  --optics %s: rc %d, '%s'\n", b[0], rc, err.c_str());
+    }
+    CHECK(parse({"m.obj", "--optics", "a=0.7,0.3"}, a, err) == 0 && parse({"m.obj", "--optics", "a=0,0.918,glass"}, a, err) == 0);   // limits included
+    CHECK(parse({"m.obj", "--transmission", "yes"}, a, err) == 1 && err == "--transmission off|on");
+    CHECK(parse({"m.obj", "--fresnel", "1"}, a, err) == 1 && err == "--fresnel on|off");
+    CHECK(parse({"m.obj", "--optics"}, a, err) == 1 && err == "missing value for --optics");
+    CHECK(parse({"m.obj", "--transmission", "on", "--mode", "ladybug"}, a, err) == 1 && err.find("physical") != std::string::npos);
+    CHECK(parse({"m.obj", "--mode", "ladybug", "--optics", "a=0.2,0.5", "--transmission", "off"}, a, err) == 0);   // optics: a no-op there
+    Options lbt; lbt.mode = Mode::Ladybug; lbt.transmission = true;
+    CHECK(!optics_ok(lbt, err));   // run() checks the same
+  }
+
+  // --- resolution: precedence NAME/SLOT > NAME > * > built-in (rho 0.2, tau 0), glass tn, and every error
+  {
+    Mesh fe = polygon({0, 0, 0, 1, 0, 0, 0, 1, 0}); fe.name = "Facade/East";
+    Mesh wall = polygon({0, 0, 0, 1, 0, 0, 0, 1, 0}); wall.name = "wall";
+    wall.counts = {3, 3, 3}; wall.indices = {0, 1, 2, 0, 1, 2, 0, 1, 2}; wall.slot = {0, 2, 0};   // slots 0..2 (1 unused)
+    Mesh roof = polygon({0, 0, 0, 1, 0, 0, 0, 1, 0}); roof.name = "roof";
+    const std::vector<Mesh> ms{fe, wall, roof};
+    std::vector<Slot> s;
+    CHECK(resolve_optics(ms, {}, s, err) && s.size() == 5);
+    for (const Slot& x : s) CHECK(x.rho == 0.2f && x.tau == 0 && x.flags == 0);
+    std::vector<Optics> rows = {{"wall", 2, 0, 0.64, true}, {"*", -1, 0.3, 0, false}, {"wall", -1, 0.4, 0.1, false}, {"Facade/East", -1, 0.5, 0, false}};
+    CHECK(resolve_optics(ms, rows, s, err) && s.size() == 5);
+    if (s.size() == 5) {
+      CHECK(s[0].rho == 0.5f && s[0].tau == 0);                                             // Facade/East: NAME over *
+      CHECK(s[1].rho == 0.4f && s[1].tau == 0.1f && s[2].rho == 0.4f && s[1].flags == 0);  // wall/0, wall/1: NAME
+      CHECK(s[3].rho == 0 && s[3].tau == 0.64f && s[3].flags == kSlotGlass && std::fabs(s[3].tn - 0.6975761815) < 1e-7);   // wall/2: NAME/SLOT
+      CHECK(s[4].rho == 0.3f && s[4].tau == 0);                                             // roof: *
+    }
+    Mesh twin = roof;
+    const struct { std::vector<Mesh> m; std::vector<Optics> r; const char* what; } bad[] = {
+        {ms, {{"Facade", -1, 0.2, 0, false}}, "no mesh of that name"},
+        {{fe, roof, twin}, {{"roof", -1, 0.2, 0, false}}, "several meshes have that name"},
+        {ms, {{"wall", 3, 0.2, 0, false}}, "slot out of range (the mesh has slots 0..2)"},
+        {ms, {{"roof", 1, 0.2, 0, false}}, "slot out of range (the mesh has slots 0..0)"},
+        {ms, {{"wall", 1, 0.2, 0, false}, {"wall", 1, 0.3, 0, false}}, "--optics wall/1 given twice"},
+        {ms, {{"*", -1, 0.2, 0, false}, {"*", -1, 0.3, 0, false}}, "--optics * given twice"}};
+    for (const auto& b : bad) {
+      err.clear();
+      CHECK(!resolve_optics(b.m, b.r, s, err) && err.find(b.what) != std::string::npos);
+    }
+    CHECK(resolve_optics({fe, roof, twin}, {{"fe", -1, 0.2, 0, false}}, s, err) == false);   // unknown, with a repeated name elsewhere
+    Mesh odd = wall; odd.slot.pop_back();                                                 // Mesh::slot not one per face
+    err.clear(); CHECK(!resolve_optics({odd}, {}, s, err) && err.find("2 slots for 3 faces") != std::string::npos);
   }
   if (failures) std::printf("check_mesh: %d failure(s)\n", failures);
   return failures;

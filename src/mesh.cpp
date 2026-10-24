@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
-// OBJ / .dmesh readers, triangulation (earcut for n-gons), sensor derivation (ladybug / physical rules).
+// OBJ / .dmesh readers, triangulation (earcut for n-gons), sensor derivation (ladybug / physical rules), optics slots
+// (row checks, resolution per global slot, thin solids).
 #include "internal.h"
+#include "glass.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
 #include <charconv>
 #include <cstring>
+#include <unordered_map>
 #include <mapbox/earcut.hpp>
 
 namespace daylight {
@@ -78,15 +81,17 @@ void bbox_centre(const std::vector<Mesh>& meshes, double c[3]) {
   for (int k = 0; k < 3; ++k) c[k] = lo[k] <= hi[k] ? (lo[k] + hi[k]) / 2 : 0;
 }
 
-void triangulate(const Mesh& m, const double c[3], Tris& out, int& skipped) {
+void triangulate(const Mesh& m, const double c[3], Tris& out, int& skipped, uint32_t slotBase) {
   unsigned base = (unsigned)out.v.size();
   V C{c[0], c[1], c[2]};
   for (size_t i = 0; i < m.numPoints(); ++i) out.v.push_back(f3(pt(m, (int)i) - C));
-  auto emit = [&](int a, int b, int d) { out.i.push_back(uint3{base + (unsigned)a, base + (unsigned)b, base + (unsigned)d}); };
+  uint32_t slot = slotBase;
+  auto emit = [&](int a, int b, int d) { out.i.push_back(uint3{base + (unsigned)a, base + (unsigned)b, base + (unsigned)d}); out.slot.push_back(slot); };
   size_t off = 0;
   for (size_t f = 0; f < m.counts.size(); ++f) {
     const int n = m.counts[f], *idx = m.indices.data() + off;
     off += n;
+    slot = slotBase + (m.slot.empty() ? 0u : m.slot[f]);
     if (n == 3) emit(idx[0], idx[1], idx[2]);
     else if (n == 4) { emit(idx[0], idx[1], idx[2]); emit(idx[0], idx[2], idx[3]); }  // ponytail: no convexity check (matches Tydra)
     else if (n >= 5) {
@@ -102,6 +107,86 @@ void triangulate(const Mesh& m, const double c[3], Tris& out, int& skipped) {
       for (size_t k = 0; k + 2 < t.size(); k += 3) emit(idx[t[k]], idx[t[k + 1]], idx[t[k + 2]]);
     } else ++skipped;
   }
+}
+
+size_t slot_count(const Mesh& m) { return m.slot.empty() ? 1 : size_t(*std::max_element(m.slot.begin(), m.slot.end())) + 1; }
+
+bool optics_ok(const Options& opt, std::string& err) {
+  for (const Optics& o : opt.optics) {
+    const std::string row = "--optics " + o.mesh + (o.slot >= 0 ? "/" + std::to_string(o.slot) : "") + ": ";
+    if (o.mesh.empty() || o.slot < -1 || o.slot > 65535 || (o.mesh == "*" && o.slot >= 0)) { err = row + "NAME (or *) with an optional /SLOT 0..65535"; return false; }
+    if (!(o.rho >= 0 && o.rho <= 1 && o.tau >= 0 && o.tau <= 1)) { err = row + "RHO and TAU must be in 0..1"; return false; }
+    if (o.rho + o.tau > 1 + 1e-9) { err = row + "RHO + TAU must not exceed 1"; return false; }
+    if (o.glass && o.rho != 0) { err = row + "glass reflects by angle: RHO must be 0"; return false; }
+    if (o.glass && !(o.tau > 0 && o.tau <= 0.918)) { err = row + "glass TAU must be in (0, 0.918] (n 1.52 passes at most 0.918)"; return false; }
+  }
+  if (opt.transmission && opt.mode == Mode::Ladybug) { err = "--transmission on needs --mode physical (ladybug: every surface opaque and black)"; return false; }
+  return true;
+}
+
+bool resolve_optics(const std::vector<Mesh>& meshes, const std::vector<Optics>& rows, std::vector<Slot>& out, std::string& err) {
+  std::vector<size_t> base(meshes.size() + 1, 0);
+  std::unordered_map<std::string, size_t> byName;   // mesh index, SIZE_MAX when several meshes share the name
+  for (size_t k = 0; k < meshes.size(); ++k) {
+    const Mesh& m = meshes[k];
+    if (!m.slot.empty() && m.slot.size() != m.numFaces()) { err = "mesh " + m.name + ": " + std::to_string(m.slot.size()) + " slots for " + std::to_string(m.numFaces()) + " faces"; return false; }
+    base[k + 1] = base[k] + slot_count(m);
+    if (!byName.emplace(m.name, k).second) byName[m.name] = SIZE_MAX;
+  }
+  std::vector<std::pair<std::string, int>> keys;
+  for (const Optics& o : rows) keys.emplace_back(o.mesh, o.slot);
+  std::sort(keys.begin(), keys.end());
+  if (auto d = std::adjacent_find(keys.begin(), keys.end()); d != keys.end()) {
+    err = "--optics " + d->first + (d->second >= 0 ? "/" + std::to_string(d->second) : "") + " given twice"; return false;
+  }
+  out.assign(base.back(), Slot{});
+  for (int rank = 0; rank < 3; ++rank)   // * < NAME < NAME/SLOT: later ranks overwrite
+    for (const Optics& o : rows) {
+      if ((o.mesh == "*" ? 0 : o.slot < 0 ? 1 : 2) != rank) continue;
+      const std::string row = "--optics " + o.mesh + (o.slot >= 0 ? "/" + std::to_string(o.slot) : "") + ": ";
+      size_t b = 0, e = out.size();
+      if (rank) {
+        const auto it = byName.find(o.mesh);
+        if (it == byName.end()) { err = row + "no mesh of that name"; return false; }
+        if (it->second == SIZE_MAX) { err = row + "several meshes have that name"; return false; }
+        b = base[it->second]; e = base[it->second + 1];
+        if (rank == 2 && size_t(o.slot) >= e - b) { err = row + "slot out of range (the mesh has slots 0.." + std::to_string(e - b - 1) + ")"; return false; }
+        if (rank == 2) { b += size_t(o.slot); e = b + 1; }
+      }
+      const Slot s{float(o.rho), float(o.tau), o.glass ? float(tn_from_Tn(o.tau)) : 0.f, o.glass ? kSlotGlass : 0u};
+      std::fill(out.begin() + std::ptrdiff_t(b), out.begin() + std::ptrdiff_t(e), s);
+    }
+  return true;
+}
+
+unsigned thin_solid(const Mesh& m, unsigned s, const double c[3]) {
+  using Key = std::array<long long, 3>;
+  const V C{c[0], c[1], c[2]};
+  std::vector<Key> keys;   // welded position of every corner of the slot's faces, face after face
+  std::vector<int> n;      // corners per face
+  double vol = 0, area = 0;
+  size_t off = 0;
+  for (size_t f = 0; f < m.counts.size(); ++f) {
+    const int k = m.counts[f], *idx = m.indices.data() + off;
+    off += k;
+    if ((m.slot.empty() ? 0u : m.slot[f]) != s) continue;
+    const V N = newell(m, idx, k);   // |N| = 2 area: volume = sum N . p / 6 over closed planar faces
+    area += len(N) / 2; vol += dot(N, pt(m, idx[0]) - C) / 6;
+    for (int j = 0; j < k; ++j) { const V p = pt(m, idx[j]) - C; keys.push_back({std::llround(p.x * 1e5), std::llround(p.y * 1e5), std::llround(p.z * 1e5)}); }
+    n.push_back(k);
+  }
+  if (!(area > 0) || 2 * std::fabs(vol) / area >= 0.1) return 0;
+  std::vector<Key> u = keys;
+  std::sort(u.begin(), u.end()); u.erase(std::unique(u.begin(), u.end()), u.end());
+  const auto id = [&](size_t j) { return std::lower_bound(u.begin(), u.end(), keys[j]) - u.begin(); };
+  std::vector<std::pair<std::ptrdiff_t, std::ptrdiff_t>> fwd, rev;   // directed edges between welded points, and reversed
+  for (size_t f = 0, j0 = 0; f < n.size(); j0 += size_t(n[f++]))
+    for (int j = 0; j < n[f]; ++j) {
+      const std::ptrdiff_t a = id(j0 + size_t(j)), b = id(j0 + size_t((j + 1) % n[f]));
+      if (a != b) { fwd.emplace_back(a, b); rev.emplace_back(b, a); }
+    }
+  std::sort(fwd.begin(), fwd.end()); std::sort(rev.begin(), rev.end());
+  return fwd == rev ? kSlotThin | (vol < 0 ? kSlotInward : 0u) : 0u;
 }
 
 size_t make_sensors(const Mesh& m, const Options& opt, const double c[3], Sensors& out, std::string& warn) {

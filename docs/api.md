@@ -27,7 +27,12 @@ identity of its meshes + `selfOcclude`: when the key equals the previous run's, 
 acceleration structure stay resident and only sensors, directions and the trace are redone; the GPU context is kept
 for the whole process either way. `Options::residentScenes = N` keeps up to N keyed scenes in VRAM (least recently
 used freed first, and while less than 1 GB is free), so users who alternate between models do not rebuild each other's;
-`scene_resident(key)` tells whether a run would reuse one. `Options::cancel` points to an `std::atomic<bool>` another
+`Result::sceneReused` tells whether the run reused one. Optics: `Options::optics` holds the `--optics` rows
+(`daylight::Optics {mesh, slot, rho, tau, glass}`, mesh = `Mesh::name`, slot -1 = the whole mesh, face slots from
+`Mesh::slot`), `Options::transmission` and `Options::fresnel` the switches ([cli.md](cli.md)). `run()` fails on rows out
+of range and on rows the meshes do not resolve (unknown or ambiguous name, slot out of range, a row given twice; the
+server reports a job error). Values may change between runs of one key without a rebuild; a slot that starts or stops
+transmitting rebuilds (the set of transmitting slots is part of the identity). `Options::cancel` points to an `std::atomic<bool>` another
 thread may set: `run()` then stops at its next check (before the sky model, before the GPU, per trace chunk) and fails
 with "cancelled". `run()` itself is one call at a time per process (one GPU, one owner thread). `src/cli.h` (`daylight::cli::parse` / `prepare` / `manifest_json`) exposes the CLI's
 flag parsing, weather / time rules and manifest for front ends that accept CLI flags verbatim.

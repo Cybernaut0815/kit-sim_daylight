@@ -2,11 +2,12 @@
 
 This project (Apache 2.0 with the Commons Clause, see LICENSE) contains or uses the following third-party material.
 
-## Radiance (gendaymtx.c, sun.c, color.h) -- ported code in src/sky.cpp
+## Radiance (gendaymtx.c, sun.c, color.h, m_glass.c) -- ported code in src/sky.cpp and src/glass.h
 
 The Perez all-weather sky model, sky patch subdivision (Reinhart/Tregenza), sun-to-patch binning and the simple
 solar position in src/sky.cpp are ported from Radiance 5.4 (tag rad5R4), files src/gen/gendaymtx.c, src/gen/sun.c
-and src/common/color.h, under the Radiance Software License, Version 2.0 reproduced below. The Perez sky code in
+and src/common/color.h, and the glass transmittance / reflectance and the transmissivity formula in src/glass.h from
+src/rt/m_glass.c, under the Radiance Software License, Version 2.0 reproduced below. The Perez sky code in
 gendaymtx.c additionally carries the notice of byHeart Consultants Limited (Ian Ashdown), which is reproduced at the
 top of src/sky.cpp. Radiance is a registered trademark of The Regents of the University of California; this project
 is not endorsed by or affiliated with LBNL or the University of California.

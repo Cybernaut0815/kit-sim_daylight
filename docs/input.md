@@ -22,7 +22,8 @@ offset 32  float64   xyz[3 * n_points]      world metres, Z-up
 
 Without the slot block every face is slot 0. A flag bit other than bit 0, or a slot block shorter than `n_faces`
 values, is an error; bytes after the last array are ignored (readers older than the slot block read such a file
-as plain geometry). OBJ and USD input is geometry only: every face is slot 0.
+as plain geometry). OBJ and USD input is geometry only: every face is slot 0. A slot carries the numbers that
+`--optics NAME/SLOT=...` gives it ([cli.md](cli.md)); a mesh has slots 0 to its largest face slot.
 
 Positional files are analysed (sensors) and, by default, also block rays; `--context FILE` files block only (roles
 are per file). Location and time: `--epw FILE` gives weather and location, `--clear-sky` synthesises weather for

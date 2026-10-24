@@ -8,6 +8,15 @@
   rounding, sun spread over the 4 nearest patches, sun.c positions, ground = reflectance x mean sky patch.
   Use with `--no-self-occlude --offset 0` for library parity (the Grasshopper component uses 0.1 m and self-shading).
 
+Surfaces, both modes by default: every triangle is opaque and black; the only reflection is the infinite Lambertian
+ground (`--ground`) seen by rays that leave the model. `--optics` gives numbers per mesh or face slot (no material
+names: the caller derives them); `--transmission on` (physical mode only, refused in ladybug mode, where `--optics` is
+a no-op) lets glass and porous slots pass light, with `--fresnel` choosing angle-dependent glass (Radiance `glass`,
+n 1.52) or a flat tau. Ray bending is not modelled: a pane's faces are parallel, light leaves in its own direction.
+Sun hours with transmission count equivalent full-sun hours (an hour behind tau 0.6 counts 0.6). For EN 17037 / BRE
+sunlight checks on a window, leave the window's own glazing out of the model, or give its slot an Opening, tau 1
+(`--optics Facade/2=0,1 --transmission on`): the count then stays exact.
+
 Weather sources, both modes: an EPW (`--epw`, measured/typical hourly DNI and DHI) or `--clear-sky`: for every hour
 of a 365-day year the Ineichen-Perez clear-sky model (as in pvlib `clearsky.ineichen`: Kasten-Young airmass,
 Spencer extraterrestrial irradiance, Linke turbidity `--turbidity`, site `--altitude`) at the mid-hour sun

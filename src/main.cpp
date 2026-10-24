@@ -98,6 +98,7 @@ void bench_scene(size_t nSens, size_t nTris, std::vector<Mesh>& meshes) {
       boxes.counts.push_back(3); boxes.indices.insert(boxes.indices.end(), {base + q[0], base + q[2], base + q[3]});
     }
   }
+  for (size_t f = 0; f < boxes.counts.size(); ++f) boxes.slot.push_back(static_cast<uint16_t>(f % 16));   // a slotted GAS, as app meshes
   meshes.push_back(std::move(boxes));
 }
 
@@ -131,6 +132,7 @@ int main(int argc, char** argv) {
     for (const std::string& p : a.context)
       if (!load(p, false, a.opt.verbose, meshes, err)) { std::fprintf(stderr, "error: %s\n", err.c_str()); return 2; }
   }
+  if (std::vector<Slot> slots; !resolve_optics(meshes, a.opt.optics, slots, err)) return usage_error(err.c_str());   // names known now
 
   const auto t0 = std::chrono::steady_clock::now();
   Result res;

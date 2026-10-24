@@ -28,7 +28,7 @@ add_custom_command(OUTPUT "${GEN}/trace.optixir"
   COMMAND "${CMAKE_CUDA_COMPILER}" -optix-ir -arch=compute_75 --use_fast_math -m64 -std=c++17
           -ccbin "${CMAKE_CXX_COMPILER}" -I "${OPTIX_INCLUDE}" -I "${CMAKE_CURRENT_SOURCE_DIR}/src"
           "${CMAKE_CURRENT_SOURCE_DIR}/src/trace_dev.cu" -o "${GEN}/trace.optixir"
-  DEPENDS src/trace_dev.cu src/params.h
+  DEPENDS src/trace_dev.cu src/params.h src/glass.h
   COMMENT "nvcc -optix-ir trace_dev.cu" VERBATIM)
 add_custom_command(OUTPUT "${GEN}/trace_optixir.h"
   COMMAND "${CMAKE_COMMAND}" -DIN=${GEN}/trace.optixir -DOUT=${GEN}/trace_optixir.h -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake"

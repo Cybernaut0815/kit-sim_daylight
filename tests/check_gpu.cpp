@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // GPU module checks: hand-coded ground + box scene, hemisphere cull, Waechter-Binder offset, reduce / series
-// against CPU loops over the downloaded bits, adaptive sub-launches. Self-skips without a CUDA device.
+// against CPU loops over the downloaded bits or transmittance bytes, adaptive sub-launches, the Radiance glass port,
+// and run() end to end with optics (slots, thin solids, residency). Self-skips without a CUDA device.
+#include "glass.h"
 #include "internal.h"
 #include <algorithm>
 #include <atomic>
@@ -16,13 +18,46 @@ static const double kPi = 3.14159265358979323846;
 static int failures = 0;
 #define CHECK(cond) do { if (!(cond)) { std::printf("%s:%d: CHECK(%s) failed\n", __FILE__, __LINE__, #cond); ++failures; } } while (0)
 
+Mesh box_mesh(const char* name, double x0, double y0, double z0, double x1, double y1, double z1, bool soup);   // check_mesh.cpp
+
 static float3 f3(double x, double y, double z) { return float3{float(x), float(y), float(z)}; }
 static float3 unit(double x, double y, double z) { double l = std::sqrt(x * x + y * y + z * z); return f3(x / l, y / l, z / l); }
 static float dotf(float3 a, float3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }   // same op order as the device
-static void quad(Tris& t, float3 a, float3 b, float3 c, float3 d) {   // CCW seen from outside
+static void quad(Tris& t, float3 a, float3 b, float3 c, float3 d, uint32_t slot = 0) {   // CCW seen from outside
   unsigned v = unsigned(t.v.size());
   t.v.insert(t.v.end(), {a, b, c, d});
   t.i.push_back(uint3{v, v + 1, v + 2}); t.i.push_back(uint3{v, v + 2, v + 3});
+  t.slot.insert(t.slot.end(), {slot, slot});
+}
+// One square face (2 half x 2 half, facing +z) per x, centred at (x, 0, z).
+static Mesh squares(const char* name, bool sensor, double z, double half, std::initializer_list<double> xs) {
+  Mesh m; m.name = name; m.sensor = sensor;
+  for (double x : xs) {
+    const int b = int(m.numPoints());
+    m.points.insert(m.points.end(), {x - half, -half, z, x + half, -half, z, x + half, half, z, x - half, half, z});
+    m.counts.push_back(4); m.indices.insert(m.indices.end(), {b, b + 1, b + 2, b + 3});
+  }
+  return m;
+}
+
+// Radiance glass port (glass.h) against rad5R4, run once: rtrace -ab 0 through a glass pane at z = 1 with tn =
+// tn_from_Tn(0.64) = 0.6975761815, a glow sky behind it, rays from the origin at 0 / 30 / 60 / 75 / 85 deg:
+//   glass.rad: void glass pane_mat 0 0 3 0.6975761815 0.6975761815 0.6975761815
+//              pane_mat polygon pane 0 0 12 -100 -100 1 100 -100 1 100 100 1 -100 100 1
+//              void glow skyglow 0 0 4 1 1 1 0     skyglow source sky 0 0 4 0 0 1 180
+//   oconv glass.rad > glass.oct; printf '0 0 0 sin(a) 0 cos(a)\n' ... | rtrace -ab 0 -h glass.oct
+static const double kGlassDeg[5] = {0, 30, 60, 75, 85};
+static const double kGlassT[5] = {6.400000e-01, 6.248004e-01, 5.397539e-01, 3.696623e-01, 1.153073e-01};
+
+static void check_glass() {
+  const float tn = float(tn_from_Tn(0.64));
+  float T, R;
+  for (int k = 0; k < 5; ++k) { glass_TR(float(std::cos(kGlassDeg[k] * kPi / 180)), tn, T, R); CHECK(std::fabs(T - kGlassT[k]) <= 1e-5); }
+  glass_TR(1.f, tn, T, R);
+  CHECK(std::fabs(T - 0.64) <= 1e-6);
+  for (double a : {0., 30., 60., 89.}) { glass_TR(float(std::cos(a * kPi / 180)), 1.f, T, R); CHECK(std::fabs(T + R - 1) <= 1e-6); }   // no absorption: T + R = 1
+  glass_TR(0.f, tn, T, R);
+  CHECK(T == 0 && R == 1);   // grazing: everything reflected, no NaN
 }
 // Slab test: ray from o along d against the box [lo,hi]^3 (t > 0).
 static bool hits_box(float3 o, float3 d, double lo, double hi) {
@@ -36,12 +71,15 @@ static bool hits_box(float3 o, float3 d, double lo, double hi) {
 }
 
 int check_gpu(const char* testsDir) {
+  check_glass();
   std::string err;
   Gpu* g = gpu_init(err);
-  if (!g) { std::printf("skip: no CUDA device (%s)\n", err.c_str()); return 0; }
+  if (!g) { std::printf("skip: no CUDA device (%s)\n", err.c_str()); return failures; }
 
-  CHECK(gpu_ray_flags(false) == 5u);    // TERMINATE_ON_FIRST_HIT (4) | DISABLE_ANYHIT (1)
-  CHECK(gpu_ray_flags(true) == 21u);    // + CULL_BACK_FACING_TRIANGLES (16)
+  CHECK(gpu_ray_flags(false, false) == 5u);    // TERMINATE_ON_FIRST_HIT (4) | DISABLE_ANYHIT (1)
+  CHECK(gpu_ray_flags(true, false) == 21u);    // + CULL_BACK_FACING_TRIANGLES (16)
+  CHECK(gpu_ray_flags(false, true) == 4u);     // a slot transmits: any-hit on
+  CHECK(gpu_ray_flags(true, true) == 20u);
 
   // scene: ground [-2,2]^2 at z = 0, unit box [0.5,1.5]^3, all faces outward
   Tris t;
@@ -54,7 +92,7 @@ int check_gpu(const char* testsDir) {
   quad(t, f3(lo, lo, lo), f3(hi, lo, lo), f3(hi, lo, hi), f3(lo, lo, hi));   // -y
   quad(t, f3(lo, hi, lo), f3(lo, hi, hi), f3(hi, hi, hi), f3(hi, hi, lo));   // +y
   CHECK(t.i.size() == 14);
-  CHECK(gpu_build(*g, t, err));
+  CHECK(gpu_build(*g, t, {Slot{}}, err));
   CHECK(gpu_stats(*g).gasBytes > 0);
 
   // sensors: s0 under the box, s1 open, s2 facing down on the ground, s3 above the box looking down, s4 inside the box
@@ -77,7 +115,7 @@ int check_gpu(const char* testsDir) {
   CHECK(nDir == 148 && nWords == 5);
   CHECK(gpu_set_scene(*g, s, D, err));
 
-  const unsigned flags = gpu_ray_flags(false);
+  const unsigned flags = gpu_ray_flags(false, false);
   CHECK(gpu_trace(*g, 0, nc, flags, err));
   std::vector<uint32_t> bits;
   CHECK(gpu_download_bits(*g, nc, bits, err));
@@ -162,7 +200,7 @@ int check_gpu(const char* testsDir) {
   }
 
   // back-face culling flag: s4 inside the box now sees the zenith (box top hit from behind is culled)
-  CHECK(gpu_trace(*g, 0, nc, gpu_ray_flags(true), err));
+  CHECK(gpu_trace(*g, 0, nc, gpu_ray_flags(true, false), err));
   CHECK(gpu_download_bits(*g, nc, bits, err));
   CHECK(bit(4, Z) == 1 && bit(0, Z) == 0 && bit(3, NA) == 0);
 
@@ -187,8 +225,85 @@ int check_gpu(const char* testsDir) {
               after.traceMs - before.traceMs, double(after.rays - before.rays) / ((after.traceMs - before.traceMs) * 1e6),
               after.buildMs, after.gasBytes);
 
+  // byte mode: porous 0.5 panes (slot 1 at z = 1 over x in [-50, 50], slot 2 at z = 2 over x in [0, 50]), an opaque lid
+  // (slot 0) at z = 0.5 over (30, 30); s0 under one pane, s1 under both, s2 under the lid, s3 looking down
+  {
+    Tris tp;
+    quad(tp, f3(-50, -50, 1), f3(50, -50, 1), f3(50, 50, 1), f3(-50, 50, 1), 1);
+    quad(tp, f3(0, -50, 2), f3(50, -50, 2), f3(50, 50, 2), f3(0, 50, 2), 2);
+    quad(tp, f3(25, 25, 0.5), f3(35, 25, 0.5), f3(35, 35, 0.5), f3(25, 35, 0.5), 0);
+    std::vector<Slot> sl(3);
+    sl[1].tau = sl[2].tau = 0.5f;
+    Sensors sp;
+    sp.p = {f3(-10, 0, 0), f3(10, 0, 0), f3(30, 30, 0), f3(-10, 0, 0)};
+    sp.n = {f3(0, 0, 1), f3(0, 0, 1), f3(0, 0, 1), f3(0, 0, -1)};
+    const size_t np = sp.p.size();
+    CHECK(gpu_build(*g, tp, sl, err) && gpu_set_slots(*g, sl, err) && gpu_set_scene(*g, sp, D, err));
+    const unsigned tf = gpu_ray_flags(false, true);
+    std::vector<uint8_t> by;
+    CHECK(gpu_trace(*g, 0, np, tf, err) && gpu_download_bytes(*g, np, by, err) && by.size() == nDir * np);
+    auto byte = [&](size_t i, unsigned d) { return by[d * np + i]; };
+    CHECK(byte(0, Z) == 128 && byte(1, Z) == 64 && byte(2, Z) == 0 && byte(3, Z) == 0 && byte(3, NA) == 255 && byte(0, NA) == 0);
+    // reduce / series against CPU loops over the bytes (T = byte / 255)
+    for (unsigned d = 0; d < nDir; ++d) W[d] = 0.04f * (1.f + 0.01f * d);
+    std::vector<double> ob(np);
+    CHECK(gpu_reduce(*g, np, W.data(), true, ob.data(), err));
+    for (size_t i = 0; i < np; ++i) {
+      double acc = 0;
+      for (unsigned d = 0; d < nDir; ++d) if (byte(i, d)) acc += (double)(std::max(dotf(sp.n[i], D[d]), 0.f) * (byte(i, d) / 255.f)) * W[d];
+      CHECK(std::fabs(ob[i] - acc) <= 1e-9 && acc > 0);
+    }
+    std::vector<float> Gp(np, 0.25f), Ep(np * T);
+    SeriesIn ip = in; ip.G = Gp.data();
+    CHECK(gpu_series(*g, np, ip, Ep.data(), err));
+    for (size_t i = 0; i < np; ++i) {
+      double sk = 0;
+      for (unsigned d = 0; d < nSky; ++d) sk += std::max(dotf(sp.n[i], D[d]), 0.f) * (byte(i, d) / 255.f) * wsky[d];
+      for (int tt = 0; tt < T; ++tt) {
+        const double e = sk + 0.25 * gt[tt] + (tt == 1 ? std::max(sp.n[i].z, 0.f) * (byte(i, Z) / 255.f) * 100.0 : 0.0);
+        CHECK(std::fabs(Ep[i * T + tt] - e) <= 1e-4 * e + 1e-6);
+      }
+    }
+    // chunk at i0 = 1 (s1, s2): the same bytes, reduce and series
+    std::vector<uint8_t> sub; std::vector<double> o2(2); std::vector<float> E2(2 * T);
+    SeriesIn ip2 = ip; ip2.G = Gp.data() + 1;
+    CHECK(gpu_trace(*g, 1, 2, tf, err) && gpu_download_bytes(*g, 2, sub, err) && sub.size() == nDir * 2);
+    for (unsigned d = 0; d < nDir; ++d) for (size_t i = 0; i < 2; ++i) CHECK(sub[d * 2 + i] == byte(1 + i, d));
+    CHECK(gpu_reduce(*g, 2, W.data(), true, o2.data(), err) && gpu_series(*g, 2, ip2, E2.data(), err));
+    for (size_t i = 0; i < 2; ++i) { CHECK(o2[i] == ob[i + 1]); for (int tt = 0; tt < T; ++tt) CHECK(E2[i * T + tt] == Ep[(i + 1) * T + tt]); }
+    CHECK(!gpu_download_bits(*g, 2, bits, err));   // bytes were written, not bits
+    // transmission off: the same GAS traced without any-hit gives the bits of an all-opaque build
+    std::vector<uint32_t> offBits, opaqueBits;
+    CHECK(gpu_trace(*g, 0, np, gpu_ray_flags(false, false), err) && gpu_download_bits(*g, np, offBits, err));
+    std::vector<Slot> opaque(3);
+    CHECK(gpu_build(*g, tp, opaque, err) && gpu_set_slots(*g, opaque, err));
+    CHECK(gpu_trace(*g, 0, np, gpu_ray_flags(false, false), err) && gpu_download_bits(*g, np, opaqueBits, err));
+    CHECK(offBits == opaqueBits && ((offBits[(Z / 32) * np] >> (Z % 32)) & 1u) == 0);
+    std::vector<Slot> few(2);
+    CHECK(!gpu_build(*g, tp, few, err) && err.find("slot") != std::string::npos);   // a triangle in slot 2 needs 3 records
+    err.clear();
+  }
+
+  // glass pane (slot 0) at z = 1: bytes at the five rtrace angles within half a step; --fresnel off (no kSlotGlass) = tau
+  {
+    Tris tg;
+    quad(tg, f3(-100, -100, 1), f3(100, -100, 1), f3(100, 100, 1), f3(-100, 100, 1));
+    Slot glass; glass.rho = 0; glass.tau = 0.64f; glass.tn = float(tn_from_Tn(0.64)); glass.flags = kSlotGlass;
+    Sensors so; so.p = {f3(0, 0, 0)}; so.n = {f3(0, 0, 1)};
+    std::vector<float3> D5;
+    for (double a : kGlassDeg) D5.push_back(f3(std::sin(a * kPi / 180), 0, std::cos(a * kPi / 180)));
+    std::vector<uint8_t> gb;
+    CHECK(gpu_build(*g, tg, {glass}, err) && gpu_set_slots(*g, {glass}, err) && gpu_set_scene(*g, so, D5, err));
+    CHECK(gpu_trace(*g, 0, 1, gpu_ray_flags(false, true), err) && gpu_download_bytes(*g, 1, gb, err) && gb.size() == 5);
+    for (int k = 0; k < 5 && gb.size() == 5; ++k) CHECK(std::fabs(gb[size_t(k)] - 255 * kGlassT[k]) <= 0.5);
+    if (gb.size() == 5) std::printf("gpu: glass bytes %d %d %d %d %d (rtrace x 255: 163.2 159.3 137.6 94.3 29.4)\n", gb[0], gb[1], gb[2], gb[3], gb[4]);
+    glass.flags = 0;
+    CHECK(gpu_set_slots(*g, {glass}, err) && gpu_trace(*g, 0, 1, gpu_ray_flags(false, true), err) && gpu_download_bytes(*g, 1, gb, err));
+    CHECK(gb == std::vector<uint8_t>(5, 163));   // 0.64 x 255 = 163.2 at every angle
+  }
+
   // empty scene: traversable 0 = every hemisphere direction visible
-  CHECK(gpu_build(*g, Tris{}, err));
+  CHECK(gpu_build(*g, Tris{}, {}, err) && gpu_set_slots(*g, {Slot{}}, err));
   CHECK(gpu_set_scene(*g, s, D, err));
   CHECK(gpu_trace(*g, 0, nc, flags, err));
   CHECK(gpu_reduce(*g, nc, std::vector<float>(nDir, 1.f).data(), false, out.data(), err));
@@ -210,12 +325,12 @@ int check_gpu(const char* testsDir) {
     Result r1, r2, r3;
     o.sceneKey = "box";
     const auto t0 = std::chrono::steady_clock::now();
-    CHECK(run(meshes, nullptr, o, r1, e2));
+    CHECK(run(meshes, nullptr, o, r1, e2) && !r1.sceneReused);
     const auto t1 = std::chrono::steady_clock::now();
-    CHECK(run(meshes, nullptr, o, r2, e2));   // same key: scene reused
+    CHECK(run(meshes, nullptr, o, r2, e2) && r2.sceneReused);    // same key: scene reused
     const auto t2 = std::chrono::steady_clock::now();
     o.sceneKey = "box-2";
-    CHECK(run(meshes, nullptr, o, r3, e2));   // new key: rebuilt, identical values
+    CHECK(run(meshes, nullptr, o, r3, e2) && !r3.sceneReused);   // new key: rebuilt, identical values
     size_t faces = 0;
     for (const Mesh& m : meshes) faces += m.numFaces();
     CHECK(r1.values.size() == faces && faces > 0);
@@ -227,14 +342,15 @@ int check_gpu(const char* testsDir) {
     // several resident scenes: A, B, A again reuses A's parked GAS with identical values; one slot only keeps the last
     o.residentScenes = 2;
     Result ra, rb, ra2;
-    o.sceneKey = "scene-A"; CHECK(run(meshes, nullptr, o, ra, e2));
-    o.sceneKey = "scene-B"; CHECK(run(meshes, nullptr, o, rb, e2));
-    CHECK(scene_resident("scene-A") && scene_resident("scene-B") && !scene_resident("scene-C") && !scene_resident(""));
-    o.sceneKey = "scene-A"; CHECK(run(meshes, nullptr, o, ra2, e2));
+    o.sceneKey = "scene-A"; CHECK(run(meshes, nullptr, o, ra, e2) && !ra.sceneReused);
+    o.sceneKey = "scene-B"; CHECK(run(meshes, nullptr, o, rb, e2) && !rb.sceneReused);
+    o.sceneKey = "scene-A"; CHECK(run(meshes, nullptr, o, ra2, e2) && ra2.sceneReused);   // A's parked GAS
     CHECK(ra2.values == ra.values && ra.values == r1.values);
     o.residentScenes = 1;
-    o.sceneKey = "scene-C"; CHECK(run(meshes, nullptr, o, ra2, e2));
-    CHECK(scene_resident("scene-C") && !scene_resident("scene-A") && !scene_resident("scene-B"));
+    o.sceneKey = "scene-C"; CHECK(run(meshes, nullptr, o, ra2, e2) && !ra2.sceneReused);
+    o.sceneKey = "scene-C"; CHECK(run(meshes, nullptr, o, ra2, e2) && ra2.sceneReused);
+    o.sceneKey = "scene-B"; CHECK(run(meshes, nullptr, o, ra2, e2) && !ra2.sceneReused);   // one slot: A and B were freed
+    o.sceneKey = "scene-A"; CHECK(run(meshes, nullptr, o, ra2, e2) && !ra2.sceneReused);
 
     // cancel: a set flag stops the run with "cancelled"
     std::atomic<bool> stop{true};
@@ -260,6 +376,72 @@ int check_gpu(const char* testsDir) {
     for (size_t i = 0; i < far.values.size() && i < near13.values.size(); ++i)
       worst = std::max(worst, std::fabs(far.values[i] - near13.values[i]) / std::max(1.0, std::fabs(near13.values[i])));
     CHECK(far.values.size() == near13.values.size() && worst < 2e-3);   // the sun differs only by one hour of declination
+  }
+
+  // run() with optics, end to end: sun hours at 06-21T12:00 Boston (the sun ~71 deg up, just west of south: a ray leaves
+  // its sensor ~0.34 m sideways per metre of height), one 1 m sensor square per case, the cases 100 m apart
+  {
+    Options o;
+    o.quantities = {Quantity::SunHours};
+    o.lat = 42.35; o.lon = -71.07; o.tz = -5;
+    o.transmission = true;
+    std::string e2;
+    CHECK(parse_hoy("06-21T12:00", false, o.t0, e2));
+    const auto sun = [&](const std::vector<Mesh>& ms, const Options& op) {
+      Result r; std::string e;
+      if (!run(ms, nullptr, op, r, e)) { std::printf("run: %s\n", e.c_str()); ++failures; }
+      return r;
+    };
+    const auto b255 = [](int b) { return double(float(b) / 255.f); };   // what a byte adds: dt (1 h) x byte / 255
+
+    // two meshes x two slots: A/0 tau 1, A/1 tau 0.5, B/0 tau 0.25 (NAME/SLOT over NAME), B/1 opaque (NAME)
+    Mesh A = squares("A", false, 1, 20, {0, 100}), B = squares("B", false, 1, 20, {200, 300});
+    A.slot = {0, 1}; B.slot = {0, 1};
+    const std::vector<Mesh> ab{squares("ground", true, 0, 0.5, {0, 100, 200, 300}), A, B};
+    o.optics = {{"A", 0, 0, 1, false}, {"A", 1, 0.2, 0.5, false}, {"B", -1, 0.2, 0, false}, {"B", 0, 0.2, 0.25, false}};
+    Result r = sun(ab, o);
+    CHECK(r.values == std::vector<double>({1, b255(128), b255(64), 0}));
+    // --transmission off: every slot opaque, the values of a run without optics
+    Options off = o; off.transmission = false;
+    Options plain = off; plain.optics.clear();
+    const Result rOff = sun(ab, off), rPlain = sun(ab, plain);
+    CHECK(rOff.values == rPlain.values && rOff.values == std::vector<double>(4, 0.0));
+
+    // glass wall south of a sensor (incidence ~71 deg): --fresnel off passes tau like porous; on passes far less
+    Mesh wall; wall.name = "wall"; wall.sensor = false;
+    wall.points = {-20, -1, 0, 20, -1, 0, 20, -1, 10, -20, -1, 10}; wall.counts = {4}; wall.indices = {0, 1, 2, 3};
+    const std::vector<Mesh> gw{squares("ground", true, 0, 0.5, {0}), wall};
+    Options gl = o; gl.optics = {{"wall", -1, 0, 0.64, true}};
+    Options gloff = gl; gloff.fresnel = false;
+    Options por = o; por.optics = {{"wall", -1, 0, 0.64, false}};
+    const Result rg = sun(gw, gl), rgoff = sun(gw, gloff), rpor = sun(gw, por);
+    CHECK(rgoff.values == rpor.values && rpor.values == std::vector<double>({b255(163)}));
+    CHECK(rg.values.size() == 1 && rg.values[0] > 0.25 && rg.values[0] < 0.55);
+    if (rg.values.size() == 1) std::printf("run: glass wall at ~71 deg incidence passes %.3f (tau 0.64)\n", rg.values[0]);
+
+    // thin solids: a 20 x 20 x 0.01 m pane box (indexed, and a soup) passes tau once; the 3 m cube twice
+    std::vector<Mesh> th{squares("ground", true, 0, 0.5, {0, 100, 200}), box_mesh("pane", -10, -10, 1, 10, 10, 1.01, false),
+                         box_mesh("soup", 90, -10, 1, 110, 10, 1.01, true), box_mesh("cube", 198.5, -1.5, 1, 201.5, 1.5, 4, false)};
+    for (size_t k = 1; k < 4; ++k) th[k].sensor = false;
+    Options tho = o; tho.optics = {{"pane", -1, 0.2, 0.5, false}, {"soup", -1, 0.2, 0.5, false}, {"cube", -1, 0.2, 0.5, false}};
+    CHECK(sun(th, tho).values == std::vector<double>({b255(128), b255(128), b255(64)}));
+
+    // residency: a tau edit on the same key reuses the scene; a slot that starts to transmit rebuilds; no key never reuses
+    const std::vector<Mesh> lid{squares("ground", true, 0, 0.5, {0}), squares("lid", false, 1, 20, {0})};
+    Options k1 = o; k1.sceneKey = "lid";
+    k1.optics = {{"lid", -1, 0.2, 0.3, false}}; r = sun(lid, k1);
+    CHECK(!r.sceneReused && r.values.size() == 1 && std::fabs(r.values[0] - 0.3) <= 0.5 / 255 + 1e-6);
+    k1.optics = {{"lid", -1, 0.2, 0.5, false}}; r = sun(lid, k1);
+    CHECK(r.sceneReused && r.values == std::vector<double>({b255(128)}));
+    k1.sceneKey = "lid-2"; k1.optics = {{"lid", -1, 0.2, 0, false}}; r = sun(lid, k1);
+    CHECK(!r.sceneReused && r.values == std::vector<double>({0.0}));
+    k1.optics = {{"lid", -1, 0.2, 0.5, false}}; r = sun(lid, k1);
+    CHECK(!r.sceneReused && r.values == std::vector<double>({b255(128)}));
+    k1.optics = {{"lid", -1, 0.2, 0.25, false}}; r = sun(lid, k1);
+    CHECK(r.sceneReused && r.values == std::vector<double>({b255(64)}));
+    k1.sceneKey.clear(); r = sun(lid, k1);
+    CHECK(!r.sceneReused); r = sun(lid, k1);
+    CHECK(!r.sceneReused && r.values == std::vector<double>({b255(64)}));
   }
   return failures;
 }

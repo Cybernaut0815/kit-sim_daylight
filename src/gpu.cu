@@ -21,13 +21,16 @@ struct Gpu {
   OptixProgramGroup pg[3] = {};
   OptixPipeline pipeline = nullptr;
   OptixShaderBindingTable sbt = {};
+  char hdr[3][OPTIX_SBT_RECORD_HEADER_SIZE] = {};   // packed headers: raygen, miss, hitgroup (every slot's record)
+  unsigned maxSbt = 0;                              // OPTIX_DEVICE_PROPERTY_LIMIT_MAX_SBT_RECORDS_PER_GAS
   OptixTraversableHandle gas = 0;
-  void *dGas = nullptr, *dSbt = nullptr;
+  void *dGas = nullptr, *dSbt = nullptr; size_t sbtCap = 0;
   Params* dParams = nullptr;
   float3 *dP = nullptr, *dN = nullptr, *dD = nullptr;
   size_t nSensors = 0, nDir = 0, nWords = 0;
   size_t i0 = 0;                            // first sensor of the last gpu_trace chunk
-  unsigned* dBits = nullptr; size_t bitsCap = 0;
+  bool bytes = false;                       // the last gpu_trace wrote transmittance bytes (any-hit on), not bits
+  void* dVis = nullptr; size_t visCap = 0;  // its bits or bytes
   void* dScratch = nullptr; size_t scratchCap = 0;   // reduce / series inputs
   void* dOut = nullptr; size_t outCap = 0;           // reduce / series outputs
   cudaEvent_t ev[2] = {};
@@ -58,12 +61,23 @@ __device__ __forceinline__ float dotf(float3 a, float3 b) {
 }
 
 // k_reduce / k_series read visibility through an accessor V: mask(w, i) = the visible directions 32w..32w+31 of sensor
-// i as bits, at(d, i) = the fraction of visible direction d that arrives. at() scales the first factor of each product,
-// where the exact 1.0f of Bits leaves the rounding and fma contraction of the bit walk unchanged.
+// i as bits, bit(d, i) = one of them, at(d, i) = the fraction of visible direction d that arrives. at() scales the first
+// factor of each product, where the exact 1.0f of Bits leaves the rounding and fma contraction of the bit walk unchanged.
 struct Bits {   // gpu_trace's word-major bits[w*nc + i]
   const unsigned* b; unsigned nc;
   __device__ __forceinline__ unsigned mask(unsigned w, unsigned i) const { return b[w * nc + i]; }
+  __device__ __forceinline__ unsigned bit(unsigned d, unsigned i) const { return (b[(d >> 5) * nc + i] >> (d & 31)) & 1u; }
   __device__ __forceinline__ float at(unsigned, unsigned) const { return 1.f; }
+};
+struct Bytes {   // byte mode: transmittance bytes[d*nc + i], x255 (255 = 1.0f, 0 = culled or blocked)
+  const unsigned char* b; unsigned nc, nDir;
+  __device__ __forceinline__ unsigned mask(unsigned w, unsigned i) const {
+    unsigned m = 0;
+    for (unsigned k = 0; k < 32 && w * 32 + k < nDir; ++k) m |= unsigned(b[(w * 32 + k) * nc + i] != 0) << k;
+    return m;
+  }
+  __device__ __forceinline__ unsigned bit(unsigned d, unsigned i) const { return b[d * nc + i] != 0; }
+  __device__ __forceinline__ float at(unsigned d, unsigned i) const { return b[d * nc + i] / 255.f; }
 };
 
 template <class V>
@@ -114,7 +128,7 @@ __global__ void k_series(unsigned nc, V vis, const float3* N, const float3* D, u
   }
   for (unsigned j = 0; j < nSun; ++j) {
     const unsigned d = sun0 + j;
-    if ((vis.mask(d >> 5, i) >> (d & 31)) & 1u) Ei[sunStep[j]] += fmaxf(dotf(n, sunVec[j]), 0.f) * vis.at(d, i) * sunW[j];
+    if (vis.bit(d, i)) Ei[sunStep[j]] += fmaxf(dotf(n, sunVec[j]), 0.f) * vis.at(d, i) * sunW[j];
   }
 }
 
@@ -127,6 +141,7 @@ static bool init(Gpu& g, std::string& err) {
   if (r != OPTIX_SUCCESS) { err = std::string("optixInit failed (driver too old or nvoptix.dll missing): ") + optixGetErrorString(r); return false; }
   OptixDeviceContextOptions co = {};
   OX(optixDeviceContextCreate(nullptr, &co, &g.ctx));
+  OX(optixDeviceContextGetProperty(g.ctx, OPTIX_DEVICE_PROPERTY_LIMIT_MAX_SBT_RECORDS_PER_GAS, &g.maxSbt, sizeof g.maxSbt));
 
   char log[4096] = {}; size_t logSize = sizeof log;
   OptixModuleCompileOptions mo = {};
@@ -134,7 +149,7 @@ static bool init(Gpu& g, std::string& err) {
   OptixPipelineCompileOptions po = {};
   po.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
   po.usesPrimitiveTypeFlags = static_cast<unsigned>(OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE);
-  po.numPayloadValues = 0; po.numAttributeValues = 2;
+  po.numPayloadValues = 1; po.numAttributeValues = 2;   // payload 0: transmittance along the ray (any-hit)
   po.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
   po.pipelineLaunchParamsVariableName = "params";
   OXL(optixModuleCreate(g.ctx, &mo, &po, reinterpret_cast<const char*>(trace_optixir), trace_optixir_len, log, &logSize, &g.module));
@@ -143,6 +158,7 @@ static bool init(Gpu& g, std::string& err) {
   pd[0].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;   pd[0].raygen.module = g.module;     pd[0].raygen.entryFunctionName = "__raygen__bits";
   pd[1].kind = OPTIX_PROGRAM_GROUP_KIND_MISS;     pd[1].miss.module = g.module;       pd[1].miss.entryFunctionName = "__miss__ms";
   pd[2].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP; pd[2].hitgroup.moduleCH = g.module; pd[2].hitgroup.entryFunctionNameCH = "__closesthit__ch";
+  pd[2].hitgroup.moduleAH = g.module; pd[2].hitgroup.entryFunctionNameAH = "__anyhit__tr";
   OptixProgramGroupOptions pgo = {};
   logSize = sizeof log;
   OXL(optixProgramGroupCreate(g.ctx, pd, 3, &pgo, log, &logSize, g.pg));
@@ -157,17 +173,10 @@ static bool init(Gpu& g, std::string& err) {
   OX(optixUtilComputeStackSizes(&ss, 1, 0, 0, &trav, &state, &cont));
   OX(optixPipelineSetStackSize(g.pipeline, trav, state, cont, 1));
 
-  struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Rec { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; } rec[3];
-  for (int k = 0; k < 3; ++k) OX(optixSbtRecordPackHeader(g.pg[k], &rec[k]));
-  if (!upload(&g.dSbt, rec, sizeof rec, err)) return false;
-  const CUdeviceptr base = reinterpret_cast<CUdeviceptr>(g.dSbt);
-  g.sbt.raygenRecord = base;
-  g.sbt.missRecordBase = base + sizeof(Rec);     g.sbt.missRecordStrideInBytes = sizeof(Rec);     g.sbt.missRecordCount = 1;
-  g.sbt.hitgroupRecordBase = base + 2 * sizeof(Rec); g.sbt.hitgroupRecordStrideInBytes = sizeof(Rec); g.sbt.hitgroupRecordCount = 1;
-
+  for (int k = 0; k < 3; ++k) OX(optixSbtRecordPackHeader(g.pg[k], g.hdr[k]));
   CU(cudaMalloc(reinterpret_cast<void**>(&g.dParams), sizeof(Params)));
   CU(cudaEventCreate(&g.ev[0])); CU(cudaEventCreate(&g.ev[1]));
-  return true;
+  return gpu_set_slots(g, {Slot{}}, err);   // one opaque slot until a scene brings its own
 }
 
 Gpu* gpu_init(std::string& err) {
@@ -183,16 +192,26 @@ void gpu_destroy(Gpu* g) {
   for (OptixProgramGroup p : g->pg) if (p) optixProgramGroupDestroy(p);
   if (g->module) optixModuleDestroy(g->module);
   if (g->ctx) optixDeviceContextDestroy(g->ctx);
-  for (void* p : {g->dGas, g->dSbt, (void*)g->dParams, (void*)g->dP, (void*)g->dN, (void*)g->dD, (void*)g->dBits, g->dScratch, g->dOut}) cudaFree(p);
+  for (void* p : {g->dGas, g->dSbt, (void*)g->dParams, (void*)g->dP, (void*)g->dN, (void*)g->dD, g->dVis, g->dScratch, g->dOut}) cudaFree(p);
   for (cudaEvent_t e : g->ev) if (e) cudaEventDestroy(e);
   delete g;
 }
 
 // ------------------------------------------------------------------ scene
-// tmp[0..3] = verts, indices, build temp, uncompacted output; the caller frees whatever is left.
-static bool build(Gpu& g, const Tris& t, void** tmp, std::string& err) {
-  if (!upload(&tmp[0], t.v.data(), t.v.size() * sizeof(float3), err) || !upload(&tmp[1], t.i.data(), t.i.size() * sizeof(uint3), err)) return false;
-  const unsigned flags = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT;
+// tmp[0..4] = verts, indices, build temp, uncompacted output, slot per triangle; the caller frees whatever is left.
+// Per-triangle SBT offsets only when a slot transmits: they grow the GAS ~18 % and cost ~6 % GRays/s (--bench), and with
+// every slot opaque one record behaves the same.
+static bool build(Gpu& g, const Tris& t, const std::vector<Slot>& slots, void** tmp, std::string& err) {
+  if (t.slot.size() != t.i.size() || std::any_of(t.slot.begin(), t.slot.end(), [&](uint32_t s) { return s >= slots.size(); })) {
+    err = "gpu_build: a triangle's slot has no Slot"; return false;
+  }
+  const bool slotted = std::any_of(slots.begin(), slots.end(), [](const Slot& s) { return s.tau > 0; });
+  if (slotted && slots.size() > g.maxSbt) { err = std::to_string(slots.size()) + " optics slots exceed the GPU's " + std::to_string(g.maxSbt) + " per scene"; return false; }
+  if (!upload(&tmp[0], t.v.data(), t.v.size() * sizeof(float3), err) || !upload(&tmp[1], t.i.data(), t.i.size() * sizeof(uint3), err) ||
+      (slotted && !upload(&tmp[4], t.slot.data(), t.slot.size() * sizeof(uint32_t), err))) return false;
+  std::vector<unsigned> flags(slotted ? slots.size() : 1, OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT);   // any-hit only where light passes,
+  for (size_t s = 0; slotted && s < slots.size(); ++s)                                          // once per crossing
+    if (slots[s].tau > 0) flags[s] = OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL;
   const CUdeviceptr vb = reinterpret_cast<CUdeviceptr>(tmp[0]);
   OptixBuildInput bi = {};
   bi.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
@@ -204,8 +223,13 @@ static bool build(Gpu& g, const Tris& t, void** tmp, std::string& err) {
   bi.triangleArray.indexStrideInBytes = sizeof(uint3);
   bi.triangleArray.numIndexTriplets = static_cast<unsigned>(t.i.size());
   bi.triangleArray.indexBuffer = reinterpret_cast<CUdeviceptr>(tmp[1]);
-  bi.triangleArray.flags = &flags;
-  bi.triangleArray.numSbtRecords = 1;
+  bi.triangleArray.flags = flags.data();
+  bi.triangleArray.numSbtRecords = static_cast<unsigned>(flags.size());
+  if (slotted) {
+    bi.triangleArray.sbtIndexOffsetBuffer = reinterpret_cast<CUdeviceptr>(tmp[4]);
+    bi.triangleArray.sbtIndexOffsetSizeInBytes = sizeof(uint32_t);
+    bi.triangleArray.sbtIndexOffsetStrideInBytes = sizeof(uint32_t);
+  }
   OptixAccelBuildOptions bo = {};
   bo.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
   bo.operation = OPTIX_BUILD_OPERATION_BUILD;
@@ -222,7 +246,7 @@ static bool build(Gpu& g, const Tris& t, void** tmp, std::string& err) {
                      reinterpret_cast<CUdeviceptr>(tmp[3]), sz.outputSizeInBytes, &g.gas, &emit, 1));
   size_t compacted = 0;
   CU(cudaMemcpy(&compacted, reinterpret_cast<void*>(emit.result), sizeof compacted, cudaMemcpyDeviceToHost));
-  for (int k = 0; k < 3; ++k) { cudaFree(tmp[k]); tmp[k] = nullptr; }   // inputs + temp freed before compaction
+  for (int k : {0, 1, 2, 4}) { cudaFree(tmp[k]); tmp[k] = nullptr; }   // inputs + temp freed before compaction
   if (compacted < sz.outputSizeInBytes) {
     CU(cudaMalloc(&g.dGas, compacted));
     OX(optixAccelCompact(g.ctx, 0, g.gas, reinterpret_cast<CUdeviceptr>(g.dGas), compacted, &g.gas));
@@ -237,14 +261,30 @@ static bool build(Gpu& g, const Tris& t, void** tmp, std::string& err) {
   return true;
 }
 
-bool gpu_build(Gpu& g, const Tris& t, std::string& err) {
+bool gpu_build(Gpu& g, const Tris& t, const std::vector<Slot>& slots, std::string& err) {
   cudaFree(g.dGas); g.dGas = nullptr; g.gas = 0; g.stats.gasBytes = 0;
   if (t.i.empty()) return true;   // empty scene: traversable 0 = every ray misses
-  void* tmp[4] = {};
-  const bool ok = build(g, t, tmp, err);
+  void* tmp[5] = {};
+  const bool ok = build(g, t, slots, tmp, err);
   for (void* p : tmp) cudaFree(p);
   if (!ok) { cudaFree(g.dGas); g.dGas = nullptr; g.gas = 0; }
   return ok;
+}
+
+bool gpu_set_slots(Gpu& g, const std::vector<Slot>& slots, std::string& err) {
+  struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Rec { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; Slot s; };
+  std::vector<Rec> rec(2 + std::max<size_t>(1, slots.size()));   // raygen, miss, one hit record per slot
+  for (size_t k = 0; k < rec.size(); ++k) {
+    std::memcpy(rec[k].header, g.hdr[std::min<size_t>(k, 2)], sizeof rec[k].header);
+    rec[k].s = k >= 2 && k - 2 < slots.size() ? slots[k - 2] : Slot{};
+  }
+  if (!grow(&g.dSbt, &g.sbtCap, rec.size() * sizeof(Rec), err)) return false;
+  CU(cudaMemcpy(g.dSbt, rec.data(), rec.size() * sizeof(Rec), cudaMemcpyHostToDevice));
+  const CUdeviceptr base = reinterpret_cast<CUdeviceptr>(g.dSbt);
+  g.sbt.raygenRecord = base;
+  g.sbt.missRecordBase = base + sizeof(Rec);         g.sbt.missRecordStrideInBytes = sizeof(Rec);     g.sbt.missRecordCount = 1;
+  g.sbt.hitgroupRecordBase = base + 2 * sizeof(Rec); g.sbt.hitgroupRecordStrideInBytes = sizeof(Rec); g.sbt.hitgroupRecordCount = unsigned(rec.size() - 2);
+  return true;
 }
 
 static_assert(sizeof(OptixTraversableHandle) == sizeof(unsigned long long), "GasSlot::gas holds an OptixTraversableHandle");
@@ -270,14 +310,17 @@ bool gpu_set_scene(Gpu& g, const Sensors& s, const std::vector<float3>& dirs, st
 // ------------------------------------------------------------------ trace / reduce / series
 bool gpu_trace(Gpu& g, size_t i0, size_t nc, unsigned rayFlags, std::string& err) {
   if (i0 + nc > g.nSensors) { err = "gpu_trace: sensor range exceeds the scene"; return false; }
-  if (!grow((void**)&g.dBits, &g.bitsCap, g.nWords * nc * sizeof(unsigned), err)) return false;
+  g.bytes = !(rayFlags & OPTIX_RAY_FLAG_DISABLE_ANYHIT);   // any-hit runs: fractional transmittance needs bytes
+  if (!grow(&g.dVis, &g.visCap, g.bytes ? g.nDir * nc : g.nWords * nc * sizeof(unsigned), err)) return false;
   g.i0 = i0;
   if (nc == 0 || g.nWords == 0) return true;
   const double targetMs = 150;   // per sub-launch, well under the 2 s Windows TDR
   size_t done = 0, n = std::min<size_t>(4096, nc);
   while (done < nc) {
-    // params.nc is the word stride of the whole chunk; the sub-launch writes its slice bits[w*nc + done + i].
-    const Params p = {g.gas, g.dP + i0 + done, g.dN + i0 + done, g.dD, (unsigned)g.nDir, (unsigned)nc, rayFlags, 0, g.dBits + done};
+    // params.nc is the row stride of the whole chunk; the sub-launch writes its slice bits[w*nc + done + i] / bytes[d*nc + done + i].
+    unsigned* bits = g.bytes ? nullptr : static_cast<unsigned*>(g.dVis) + done;
+    unsigned char* bytes = g.bytes ? static_cast<unsigned char*>(g.dVis) + done : nullptr;
+    const Params p = {g.gas, g.dP + i0 + done, g.dN + i0 + done, g.dD, (unsigned)g.nDir, (unsigned)nc, rayFlags, 0, bits, bytes};
     CU(cudaMemcpy(g.dParams, &p, sizeof p, cudaMemcpyHostToDevice));
     CU(cudaEventRecord(g.ev[0]));
     OX(optixLaunch(g.pipeline, 0, reinterpret_cast<CUdeviceptr>(g.dParams), sizeof(Params), &g.sbt, (unsigned)n, (unsigned)g.nWords, 1));
@@ -295,8 +338,12 @@ bool gpu_reduce(Gpu& g, size_t nc, const float* W, bool useCos, double* out, std
   if (nc == 0) return true;
   if (!grow(&g.dScratch, &g.scratchCap, g.nDir * sizeof(float), err) || !grow(&g.dOut, &g.outCap, nc * sizeof(double), err)) return false;
   CU(cudaMemcpy(g.dScratch, W, g.nDir * sizeof(float), cudaMemcpyHostToDevice));
-  k_reduce<<<unsigned((nc + 255) / 256), 256>>>((unsigned)nc, (unsigned)g.nWords, Bits{g.dBits, (unsigned)nc}, g.dN + g.i0, g.dD,
-                                                 static_cast<const float*>(g.dScratch), useCos, static_cast<double*>(g.dOut));
+  const auto launch = [&](auto vis) {
+    k_reduce<<<unsigned((nc + 255) / 256), 256>>>((unsigned)nc, (unsigned)g.nWords, vis, g.dN + g.i0, g.dD,
+                                                   static_cast<const float*>(g.dScratch), useCos, static_cast<double*>(g.dOut));
+  };
+  if (g.bytes) launch(Bytes{static_cast<const unsigned char*>(g.dVis), (unsigned)nc, (unsigned)g.nDir});
+  else launch(Bits{static_cast<const unsigned*>(g.dVis), (unsigned)nc});
   CU(cudaGetLastError());
   CU(cudaMemcpy(out, g.dOut, nc * sizeof(double), cudaMemcpyDeviceToHost));
   return true;
@@ -315,26 +362,38 @@ bool gpu_series(Gpu& g, size_t nc, const SeriesIn& in, float* E, std::string& er
   if (!grow(&g.dScratch, &g.scratchCap, total, err) || !grow(&g.dOut, &g.outCap, nc * T * sizeof(float), err)) return false;
   CU(cudaMemcpy(g.dScratch, h.data(), total, cudaMemcpyHostToDevice));
   const char* b = static_cast<const char*>(g.dScratch);
-  k_series<<<unsigned((nc + 255) / 256), 256>>>((unsigned)nc, Bits{g.dBits, (unsigned)nc}, g.dN + g.i0, g.dD, in.nSky,
-      reinterpret_cast<const int*>(b + off[0]), reinterpret_cast<const float*>(b + off[1]), reinterpret_cast<const float*>(b + off[2]),
-      in.T, reinterpret_cast<const float*>(b + off[3]), reinterpret_cast<const float*>(b + off[4]), in.sun0, in.nSun,
-      reinterpret_cast<const int*>(b + off[5]), reinterpret_cast<const float3*>(b + off[6]), reinterpret_cast<const float*>(b + off[7]),
-      static_cast<float*>(g.dOut));
+  const auto launch = [&](auto vis) {
+    k_series<<<unsigned((nc + 255) / 256), 256>>>((unsigned)nc, vis, g.dN + g.i0, g.dD, in.nSky,
+        reinterpret_cast<const int*>(b + off[0]), reinterpret_cast<const float*>(b + off[1]), reinterpret_cast<const float*>(b + off[2]),
+        in.T, reinterpret_cast<const float*>(b + off[3]), reinterpret_cast<const float*>(b + off[4]), in.sun0, in.nSun,
+        reinterpret_cast<const int*>(b + off[5]), reinterpret_cast<const float3*>(b + off[6]), reinterpret_cast<const float*>(b + off[7]),
+        static_cast<float*>(g.dOut));
+  };
+  if (g.bytes) launch(Bytes{static_cast<const unsigned char*>(g.dVis), (unsigned)nc, (unsigned)g.nDir});
+  else launch(Bits{static_cast<const unsigned*>(g.dVis), (unsigned)nc});
   CU(cudaGetLastError());
   CU(cudaMemcpy(E, g.dOut, nc * T * sizeof(float), cudaMemcpyDeviceToHost));
   return true;
 }
 
 bool gpu_download_bits(Gpu& g, size_t nc, std::vector<uint32_t>& out, std::string& err) {
+  if (g.bytes) { err = "gpu_download_bits: the last trace wrote bytes"; return false; }
   out.resize(g.nWords * nc);
-  if (!out.empty()) CU(cudaMemcpy(out.data(), g.dBits, out.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+  if (!out.empty()) CU(cudaMemcpy(out.data(), g.dVis, out.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+  return true;
+}
+
+bool gpu_download_bytes(Gpu& g, size_t nc, std::vector<uint8_t>& out, std::string& err) {
+  if (!g.bytes) { err = "gpu_download_bytes: the last trace wrote bits"; return false; }
+  out.resize(g.nDir * nc);
+  if (!out.empty()) CU(cudaMemcpy(out.data(), g.dVis, out.size(), cudaMemcpyDeviceToHost));
   return true;
 }
 
 GpuStats gpu_stats(const Gpu& g) { return g.stats; }
 
-unsigned gpu_ray_flags(bool cullBackfaces) {
-  return OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_ANYHIT |
+unsigned gpu_ray_flags(bool cullBackfaces, bool translucent) {
+  return OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | (translucent ? 0u : OPTIX_RAY_FLAG_DISABLE_ANYHIT) |
          (cullBackfaces ? OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES : 0u);
 }
 

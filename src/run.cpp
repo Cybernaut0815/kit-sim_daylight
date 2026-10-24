@@ -24,8 +24,8 @@ inline float3 neg(float3 v) { return float3{-v.x, -v.y, -v.z}; }
 // Process-lifetime GPU state. Created on first use and never destroyed: CUDA / OptiX teardown from a static
 // destructor runs after the runtime has unloaded and can crash at exit, and the OS reclaims the device anyway.
 // gpu_build / upload / grow free or reuse their previous buffers, so one Gpu serves every run of the process.
-// `key` is the Options::sceneKey whose occluder triangles / GAS are resident (empty = none). Not thread-safe:
-// run() is one-at-a-time, as the CLI and the server (one GPU, a mutex) use it.
+// `key` is the Options::sceneKey (+ the transmitting slots) whose occluder triangles / GAS are resident (empty = none).
+// Not thread-safe: run() is one-at-a-time, as the CLI and the server (one GPU, a mutex) use it.
 // `cur` is the scene installed in the Gpu; `parked` holds up to Options::residentScenes - 1 other scenes' GAS in VRAM,
 // most recent first, so users who alternate between scenes do not rebuild each other's.
 struct Scene {
@@ -33,6 +33,7 @@ struct Scene {
   double c[3] = {0, 0, 0};   // bbox centre the scene's triangles were recentred by
   size_t nTris = 0;
   int skipped = 0;
+  std::vector<unsigned> thin;   // per global slot: thin_solid() of the transmitting slots, from the build
   GasSlot gas;               // parked scenes only
 };
 struct Resident {
@@ -60,15 +61,10 @@ bool npy_write_header(std::FILE* f, size_t rows, size_t cols, const char* descr)
   return true;
 }
 
-bool scene_resident(const std::string& key) {
-  const Resident& R = resident();
-  if (key.empty() || !R.gpu) return false;
-  return key == R.cur.key || std::any_of(R.parked.begin(), R.parked.end(), [&](const Scene& s) { return s.key == key; });
-}
-
 bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, Result& out, std::string& err) {
   const auto cancelled = [&] { if (opt.cancel && opt.cancel->load()) { err = "cancelled"; return true; } return false; };
   // ---- validation --------------------------------------------------------------------------------------------
+  if (!optics_ok(opt, err)) return false;
   const bool ladybug = opt.mode == Mode::Ladybug;
   bool needWeather = false, wantVis = false, wantRad = false;
   for (Quantity q : opt.quantities)
@@ -106,20 +102,43 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   out.durationHours = durationHours;
 
   // ---- geometry ------------------------------------------------------------------------------------------------
+  // Optics per global slot. --transmission off: every slot opaque (bits, no any-hit); --fresnel off: glass passes tau.
+  std::vector<Slot> slots;
+  if (!resolve_optics(meshes, opt.optics, slots, err)) return false;
+  std::string lit;   // the transmitting slots: built into the GAS (geometry flags, thin solids), so part of its identity
+  for (size_t s = 0; s < slots.size(); ++s) {
+    if (!opt.transmission) slots[s].tau = 0;
+    if (!opt.fresnel) slots[s].flags &= ~kSlotGlass;
+    if (slots[s].tau > 0) lit += (lit.empty() ? "" : ",") + std::to_string(s);
+  }
+  const bool translucent = !lit.empty();
   Resident& R = resident();
-  const std::string& key = opt.sceneKey;
+  const std::string key = opt.sceneKey.empty() || lit.empty() ? opt.sceneKey : opt.sceneKey + "\ntransmitting " + lit;
   const bool installed = !key.empty() && R.gpu && key == R.cur.key;   // same meshes + selfOcclude as the scene in the Gpu
   const auto parkedAt = [&] { return std::find_if(R.parked.begin(), R.parked.end(), [&](const Scene& s) { return s.key == key; }); };
   const bool reuse = installed || (!key.empty() && R.gpu && parkedAt() != R.parked.end());
+  out.sceneReused = reuse;
   double c[3];
   Tris tris;
   int skipped = 0;
-  if (reuse) { const Scene& s = installed ? R.cur : *parkedAt(); std::copy(s.c, s.c + 3, c); skipped = s.skipped; }
+  std::vector<unsigned> thin;
+  if (reuse) { const Scene& s = installed ? R.cur : *parkedAt(); std::copy(s.c, s.c + 3, c); skipped = s.skipped; thin = s.thin; }
   else {
     bbox_centre(meshes, c);
-    for (const Mesh& m : meshes)
-      if (!m.sensor || opt.selfOcclude) triangulate(m, c, tris, skipped);
+    thin.assign(slots.size(), 0);
+    size_t base = 0;
+    for (const Mesh& m : meshes) {
+      const size_t ns = slot_count(m);
+      if (!m.sensor || opt.selfOcclude) {
+        triangulate(m, c, tris, skipped, static_cast<uint32_t>(base));
+        // ponytail: one pass over the mesh per transmitting slot; bucket the faces by slot if meshes with hundreds appear
+        for (size_t s = 0; translucent && s < ns; ++s)
+          if (slots[base + s].tau > 0) thin[base + s] = thin_solid(m, static_cast<unsigned>(s), c);
+      }
+      base += ns;
+    }
   }
+  for (size_t s = 0; s < slots.size() && s < thin.size(); ++s) slots[s].flags |= thin[s];
   Sensors sens;
   std::string warn;
   out.ranges.clear();
@@ -139,6 +158,11 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
                  reuse ? " (scene reused)" : "", T, durationHours);
     if (skipped) std::fprintf(stderr, "warn: %d degenerate faces skipped in occluders\n", skipped);
     if (!warn.empty()) std::fprintf(stderr, "warn: %s\n", warn.c_str());
+    if (translucent) {
+      size_t nLit = 0, nThin = 0;
+      for (const Slot& s : slots) { nLit += s.tau > 0; nThin += (s.flags & kSlotThin) != 0; }
+      std::fprintf(stderr, "info: %zu of %zu optics slots transmit (%zu thin solids)\n", nLit, slots.size(), nThin);
+    }
   }
 
   // ---- sun positions per step (NOAA, ladybug semantics) ----------------------------------------------------------
@@ -323,8 +347,10 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   // ---- GPU -----------------------------------------------------------------------------------------------------
   std::vector<double> acc(nSens * nQ, 0.0);
   std::vector<uint32_t> bitsBuf, bitRows;
+  std::vector<uint8_t> byteBuf, byteRows;
   const size_t nWords = (nDir + 31) / 32;
-  File sf(nullptr, std::fclose), bf(nullptr, std::fclose);   // series .npy [nSens x Tup] f4; bits .npy [nSens x nWords] u4
+  // series .npy [nSens x Tup] f4; bits .npy [nSens x nWords] u4, or with a transmitting slot transmittance [nSens x nDir] u1
+  File sf(nullptr, std::fclose), bf(nullptr, std::fclose);
   std::vector<double> seriesHoys;
   if (series) {
     sf.reset(std::fopen(opt.seriesPath.c_str(), "wb"));
@@ -333,7 +359,7 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   }
   if (!opt.dumpBitsPath.empty()) {
     bf.reset(std::fopen(opt.dumpBitsPath.c_str(), "wb"));
-    if (!bf || !npy_write_header(bf.get(), nSens, nWords, "<u4")) { err = "cannot write " + opt.dumpBitsPath; return false; }
+    if (!bf || !npy_write_header(bf.get(), nSens, translucent ? nDir : nWords, translucent ? "<u1" : "<u4")) { err = "cannot write " + opt.dumpBitsPath; return false; }
   }
   if (nDir > 0) {
     if (cancelled()) return false;
@@ -350,19 +376,22 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
         s.gas = GasSlot{};
         R.cur = s;
       } else {
-        if (!gpu_build(*g, tris, err)) return false;
-        R.cur.key = key; std::copy(c, c + 3, R.cur.c); R.cur.nTris = tris.i.size(); R.cur.skipped = skipped;
+        if (!gpu_build(*g, tris, slots, err)) return false;
+        R.cur.key = key; std::copy(c, c + 3, R.cur.c); R.cur.nTris = tris.i.size(); R.cur.skipped = skipped; R.cur.thin = thin;
       }
-      // ponytail: 1 GB VRAM floor for parked scenes; derive it from the run's own needs if large scenes start to fail
+      // ponytail: 1 GB VRAM floor for parked scenes (a chunk may hold 2 x 256 MiB: visibility + series tile); derive it
+      // from the run's own needs if large scenes start to fail
       while (!R.parked.empty() && (R.parked.size() + 1 > size_t(std::max(1, opt.residentScenes)) || gpu_free_bytes() < (size_t(1) << 30))) {
         gpu_free(R.parked.back().gas);
         R.parked.pop_back();
       }
     }
-    if (!gpu_set_scene(*g, sens, D, err)) return false;
-    // ponytail: 256 MB cap on both the bits buffer and the series tile; make it a device-memory fraction if it ever thrashes
-    const size_t ncMax = std::max<size_t>(1, (size_t(256) << 20) / (4 * std::max<size_t>(1, std::max(nWords, series ? size_t(Tup) : size_t(0)))));
-    const unsigned flags = gpu_ray_flags(opt.cullBackfaces);
+    if (!gpu_set_scene(*g, sens, D, err) || !gpu_set_slots(*g, slots, err)) return false;
+    // ponytail: 256 MiB cap on each per-chunk buffer, visibility (bits, or transmittance bytes) and the series tile; make
+    // it a device-memory fraction if it ever thrashes
+    const size_t perSensor = std::max(translucent ? nDir : 4 * nWords, series ? 4 * size_t(Tup) : size_t(0));
+    const size_t ncMax = std::max<size_t>(1, (size_t(256) << 20) / std::max<size_t>(1, perSensor));
+    const unsigned flags = gpu_ray_flags(opt.cullBackfaces, translucent);
     std::vector<double> tmp;
     std::vector<float> G, E;
     std::vector<float3> sunVec(nSun);
@@ -385,7 +414,13 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
         if (!gpu_reduce(*g, nc, Wq[qi].data(), opt.quantities[qi] != Quantity::SunHours, tmp.data(), err)) return false;
         for (size_t i = 0; i < nc; ++i) acc[(i0 + i) * nQ + qi] = tmp[i];
       }
-      if (bf) {   // word-major on the device -> row-major [nc x nWords] rows
+      if (bf && translucent) {   // direction-major bytes on the device -> row-major [nc x nDir] rows
+        if (!gpu_download_bytes(*g, nc, byteBuf, err)) return false;
+        byteRows.resize(nc * nDir);
+        for (size_t d = 0; d < nDir; ++d)
+          for (size_t i = 0; i < nc; ++i) byteRows[i * nDir + d] = byteBuf[d * nc + i];
+        if (std::fwrite(byteRows.data(), 1, byteRows.size(), bf.get()) != byteRows.size()) { err = "write failed: " + opt.dumpBitsPath; return false; }
+      } else if (bf) {   // word-major on the device -> row-major [nc x nWords] rows
         if (!gpu_download_bits(*g, nc, bitsBuf, err)) return false;
         bitRows.resize(nc * nWords);
         for (size_t wi = 0; wi < nWords; ++wi)

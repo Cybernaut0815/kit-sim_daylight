@@ -46,6 +46,11 @@ enum class Quantity { Radiation, Direct, Diffuse, Irradiance, Illuminance, SunHo
 inline constexpr const char* kQuantityNames[] = {"radiation", "direct", "diffuse", "irradiance", "illuminance", "sunhours"};
 enum class Sides { Front, Back, Both };
 
+// One --optics row: broadband optics of mesh `mesh` ("*" = every mesh), or of its face slot `slot` (>= 0). rho = diffuse
+// reflectance, tau = transmittance at normal incidence (rho + tau <= 1); glass: Radiance glass (n 1.52, rho 0,
+// 0 < tau <= 0.918), else porous (tau at every angle; opaque when tau = 0). Precedence NAME/SLOT > NAME > * > rho 0.2 tau 0.
+struct Optics { std::string mesh; int slot = -1; double rho = 0.2, tau = 0; bool glass = false; };
+
 struct Options {
   Mode mode = Mode::Physical;
   std::vector<Quantity> quantities = {Quantity::Radiation};
@@ -56,6 +61,9 @@ struct Options {
   int mf = 1;                        // sky density: 1 (145 patches), 2 (577), 4 (2305)
   int patchSamples = 1;               // physical: K = m*m stratified rays per patch
   double ground = 0.2;                // ground reflectance
+  std::vector<Optics> optics;         // per mesh / face slot (--optics); names = Mesh::name
+  bool transmission = false;          // tau lets light through glass / porous slots; false = every slot opaque (as before)
+  bool fresnel = true;                // glass by angle; false = glass passes tau at every angle
   double north = 0;                   // degrees, counterclockwise from +Y (ladybug convention; 90 = west)
   double offset = 0;                  // sensor offset along the normal, metres
   double lat = NAN, lon = NAN, tz = NAN;        // override EPW header / no-EPW runs
@@ -66,7 +74,8 @@ struct Options {
   std::string dumpBitsPath, dumpSky, dumpSun;   // validation dumps; empty = off (GPU selection: CUDA_VISIBLE_DEVICES)
   // Scene identity for long-lived callers (a server). Non-empty and equal to the previous run's key: the occluder
   // triangles and the acceleration structure of that run stay resident and are reused (the caller guarantees the
-  // meshes and selfOcclude are unchanged). Empty (the CLI): rebuilt every run. The GPU context is kept either way.
+  // meshes and selfOcclude are unchanged; optics values may change, the set of transmitting slots is part of the
+  // identity). Empty (the CLI): rebuilt every run. The GPU context is kept either way.
   std::string sceneKey;
   int residentScenes = 1;              // keyed scenes kept in VRAM (most recent first); more than 1 lets users alternate cheaply
   const std::atomic<bool>* cancel = nullptr;   // set by another thread: run() stops at its next check and fails with "cancelled"
@@ -79,6 +88,7 @@ struct Result {
   std::vector<std::pair<std::string, size_t>> ranges;    // (mesh name, element count) in input order
   double durationHours = 0;
   size_t nSky = 0, nSun = 0;                             // directions: [sky nSky | ground nSky (mirrored) | sun nSun]
+  bool sceneReused = false;                              // a resident scene (Options::sceneKey) served the run, no rebuild
 };
 
 // OBJ contract: world metres, Z-up, right-handed winding; one o/g group per mesh; 1-based global indices (v, f only).
@@ -98,8 +108,8 @@ bool read_epw(std::istream& in, const std::string& label, Weather& out, std::str
 // (NOAA position); turbidity >= 1 (3 = clean temperate air, 5-7 = urban/humid).
 bool clear_sky_weather(double lat, double lon, double tz, double turbidity, double altitude, Weather& out, std::string& err);
 // weather may be null only when every quantity is SunHours. One call at a time per process (the GPU state is shared).
+// Fails on bad Options (ranges, mode rules) and on optics rows the meshes do not resolve (unknown / ambiguous name,
+// slot out of range, duplicate row).
 bool run(const std::vector<Mesh>& meshes, const Weather* weather, const Options& opt, Result& out, std::string& err);
-// True when a run() with this Options::sceneKey would reuse a resident scene (call from the thread that calls run()).
-bool scene_resident(const std::string& sceneKey);
 
 }  // namespace daylight

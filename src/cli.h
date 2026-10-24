@@ -19,7 +19,8 @@ struct Args {
   size_t benchSens = 1000000, benchTris = 10000000;
 };
 
-// argv[1..argc) -> a. 0 ok (-h/--help sets a.help and stops), 1 usage error with err set (the caller prints kUsage).
+// argv[1..argc) -> a. 0 ok (-h/--help sets a.help and stops), 1 usage error with err set (the caller prints kUsage),
+// also for --optics rows out of range and switches the mode refuses. Mesh names in --optics are checked by run().
 int parse(int argc, char** argv, Args& a, std::string& err);
 // The rules that follow parsing: --clear-sky xor --epw; --clear-sky needs --lat --lon; tz defaults to round(lon / 15)
 // when --lat --lon come without --tz; weather from a.epw or the clear-sky model unless haveWeather is already true on
