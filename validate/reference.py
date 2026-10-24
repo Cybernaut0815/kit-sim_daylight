@@ -3,6 +3,7 @@
 
   uv run reference.py [--epw STEM ...] [--scene NAME ...] [--all]      default: Boston + Chicago, all scenes
   uv run reference.py --epw --scene canopy                              only the rcontrib reference of layer 8
+  uv run reference.py --scene canopy glass_canopy canyon plane          the rcontrib references of layers 8 and 9
 
 Per EPW (<ref>/epw/<stem>/): gendaymtx -m 1/2 -d/-s -O1 -A ASCII outputs (sky_m{1,2}_{d,s}_O1_A.txt), gendaymtx -D
 suns (suns_D.npz), ladybug Sunpath (sunpath.npz), pvlib SPA (pvlib.npz), and ladybug SkyMatrix kWh/m2 per patch
@@ -11,8 +12,8 @@ Per scene (<ref>/scene/<name>/): intersection matrices (imtx_m{mf}_n{north}_{fac
 columns [sky | ground]) and per EPW radiation values (rad_<stem>_m{mf}_n{north}_{face,vertex}.npy); DirectSunStudy
 per site (sun_imtx_<stem>_{face,vertex}.npy bool [N x n_up], sunhours_<stem>_{face,vertex}.npy).
 DC_SCENES instead get rcontrib daylight coefficients with the fixture's materials (scene.rad, scene.oct,
-dc_ab1_ad{8192,32768}.npy float32 [N x 146 bins x RGB], bin 0 = ground), and nodni.epw its summed gendaymtx skies
-(<ref>/epw/nodni/skysum_m1.npz: O1, O0 float64 [146 x RGB], rows).
+dc_ab{1,2,3}_ad{8192,32768}.npy float32 [N x 146 bins x RGB], bin 0 = ground), and nodni.epw and the --epw EPWs their
+summed gendaymtx skies (<ref>/epw/<stem>/skysum_m1.npz: O1, O0 float64 [146 x RGB], rows).
 index.json lists every file with its parameters and timings."""
 import argparse
 import json
@@ -22,6 +23,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta, timezone
 from pathlib import Path
 
@@ -45,7 +47,8 @@ GENDAYMTX, RCONTRIB, OCONV = (str(Path(folders.radbin_path) / f'{x}.exe') for x 
 RAYPATH = str(Path(folders.radiance_path) / 'lib')                     # reinhart.cal
 DEFAULT_EPWS = ['USA_MA_Boston-City.WSO_TMY', 'USA_IL_Chicago-OHare.Intl.AP.725300_TMY3']
 SCENES = ['flat', 'flat_tri', 'walls', 'box', 'tilt30', 'overhang']
-DC_SCENES = ['canopy']      # rcontrib with materials on nodni.epw skies (compare.py transmit)
+DC_SCENES = ['canopy', 'glass_canopy', 'canyon', 'plane']   # rcontrib with materials (compare.py transmit, reflect)
+DC_AB = (1, 2, 3)           # -ab N + 1 = N diffuse reflections (the sensor's own hemisphere takes the first bounce)
 DC_AD = (8192, 32768)       # two -ad: their difference measures rcontrib's noise
 SKYGLOW = ['void glow skyglow 0 0 4 1 1 1 0', 'skyglow source sky 0 0 4 0 0 1 180', 'skyglow source ground 0 0 4 0 0 -1 180']
 index = {'epw': {}, 'scene': {}, 'timings': {}}
@@ -205,10 +208,15 @@ def material(name, optics):
     return f'void plastic {name} 0 0 5 {rho:.10g} {rho:.10g} {rho:.10g} 0 0'
 
 
-def dc_refs(name, ab=1):
+def dc_refs(name):
     """rcontrib -I+ daylight coefficients (Reinhart MF 1 bins + ground bin 0) at the fixture's face centroids / normals,
-    the context meshes as Radiance polygons with their optics. -ab 1: the sky through transmitting surfaces, no diffuse
-    reflection (the skyglow sources are never direct sources); glass mirrors are specular rays, traced at any -ab."""
+    the context meshes as Radiance polygons with their optics, at every DC_AB x DC_AD. -ab 1: the sky through
+    transmitting surfaces, no diffuse reflection (the skyglow sources are never direct sources); -ab N + 1 adds N
+    diffuse reflections; glass mirrors are specular rays, traced at any -ab. rcontrib's defaults -aa 0 -as 0 -lr -10
+    make it a path tracer below the sensor's hemisphere, Russian roulette under -lw. -lw 0.5 / AD keeps the sensor's
+    -ad and caps every reflection at one sample: at -lw 0.08 / AD rad5R4 samples a reflection with 2 x 2 cells,
+    skewed away from the surface normal (a plane's reflected light: zenith cap -15 %, horizon rows +5 %; a 2 x 2 or
+    4 x 4 sensor hemisphere shows the same, 1 x 1 and 181 x 181 do not); one sample gives the cosine law."""
     js = json.loads((FIX / name / 'fixture.json').read_text())
     d = REF / 'scene' / name
     d.mkdir(parents=True, exist_ok=True)
@@ -222,9 +230,9 @@ def dc_refs(name, ab=1):
         subprocess.run([OCONV, str(d / 'scene.rad')], stdout=f, check=True)
     pts = [p + n for m in js['sensors'] for p, n in zip(m['face_centroids'], m['face_normals'])]
     inp = ''.join(' '.join(f'{x:.17g}' for x in q) + '\n' for q in pts).encode()
-    files = {}
-    for ad in DC_AD:
-        cmd = [RCONTRIB, '-I+', '-ab', str(ab), '-ad', str(ad), '-lw', f'{1e-5 * 8192 / ad:.3g}', '-e', 'MF:1', '-f',
+
+    def run(ab, ad):
+        cmd = [RCONTRIB, '-I+', '-ab', str(ab), '-ad', str(ad), '-lw', f'{0.5 / ad:.3g}', '-e', 'MF:1', '-f',
                'reinhart.cal', '-bn', 'Nrbins', '-b', 'rbin', '-m', 'skyglow', '-faf', str(d / 'scene.oct')]
         r = timed(f'{name}/dc_ab{ab}_ad{ad}', lambda: subprocess.run(cmd, input=inp, capture_output=True, check=False,
                                                                      env={**os.environ, 'RAYPATH': RAYPATH}))
@@ -232,8 +240,14 @@ def dc_refs(name, ab=1):
         dc = rad_matrix(r.stdout)
         assert dc.shape == (len(pts), 146, 3), dc.shape
         np.save(d / f'dc_ab{ab}_ad{ad}.npy', dc)
-        files[f'dc_ab{ab}_ad{ad}'] = {'file': f'dc_ab{ab}_ad{ad}.npy', 'cmd': ' '.join(['rcontrib'] + cmd[1:])}
-    index['scene'][name] = files
+        return f'dc_ab{ab}_ad{ad}', {'file': f'dc_ab{ab}_ad{ad}.npy', 'cmd': ' '.join(['rcontrib'] + cmd[1:])}
+    jobs = []
+    with ThreadPoolExecutor(len(DC_AB) * len(DC_AD)) as ex:   # rcontrib runs on one core (no -n on Windows)
+        for ab in DC_AB:
+            for ad in DC_AD:
+                jobs.append(ex.submit(run, ab, ad))
+                time.sleep(1.1)   # rcontrib seeds its sampling with time() in seconds: one start per second, independent noise
+    index['scene'][name] = dict(j.result() for j in jobs)
 
 
 def main():
@@ -250,9 +264,10 @@ def main():
         print(stem)
         epw_refs(stem)
         (REF / 'index.json').write_text(json.dumps(index, indent=1))
-    if set(a.scene) & set(DC_SCENES):
-        print('nodni')
-        sky_sums('nodni')
+    if set(a.scene) & set(DC_SCENES):   # nodni: layers 8 and 9 totals; the --epw EPWs: layer 9's reflected light
+        for stem in ['nodni'] + epws:
+            print(f'{stem} skies')
+            sky_sums(stem)
     for name in a.scene:
         print(name)
         dc_refs(name) if name in DC_SCENES else scene_refs(name, epws)

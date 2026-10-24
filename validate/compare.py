@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 """Run the daylight CLI against the references (plan section 8) and print a per-case table.
 
-  uv run compare.py <sky|sun|bits|e2e|usd|analytic|clearsky|transmit|all|selftest> --exe PATH [--epw STEM ...] [--scene NAME ...]
+  uv run compare.py <sky|sun|bits|e2e|usd|analytic|clearsky|transmit|reflect|all|selftest> --exe PATH [--epw STEM ...] [--scene NAME ...]
 
 Exit 1 on hard tolerance failures; informative rows never fail. `selftest` exercises the parsers and the residual
 decomposition on synthetic data and needs no CLI. Layer `usd` converts the usd_xform fixture with the Python binding
-(bindings/python, imported from this venv as `daylight`). Layer `transmit` runs on nodni.epw whatever --epw says.
+(bindings/python, imported from this venv as `daylight`). Layer `transmit` runs on nodni.epw whatever --epw says;
+`reflect` on nodni.epw (totals) and the --epw years (reflected light).
 CLI dump formats this script reads (contract with main.cpp):
   --out F         : one line per sensor, one `%.10g` per column; F.json manifest {"columns": [...], "duration_h",
                     "dirs": {"sky", "ground", "sun"}, "meshes": [{"name", "first", "count"}]}
@@ -35,7 +36,9 @@ LADYBUG = ['--mode', 'ladybug', '--no-self-occlude', '--offset', '0']
 TOL = {'sky_ascii_rows': 0, 'sun_noaa_deg': 1e-6, 'sun_flips': 0, 'sun_radiance_deg': 1e-4, 'sun_pvlib_deg': 0.02,
        'bits_mismatch': 1e-3, 'bits_edge_m': 1e-4, 'e2e_rel': 1e-3, 'e2e_residual_rel': 1e-3, 'sunhours_edge_h': 1.0,
        'analytic_flat': 0.01, 'analytic_direct': 1e-3, 'analytic_north': 1e-6, 'usd_rel': 1e-5,
-       'clearsky_rel': 5e-3, 'clearsky_sum_rel': 3e-3, 'transmit_bias': 0.01, 'transmit_p95': 5e-3}
+       'clearsky_rel': 5e-3, 'clearsky_sum_rel': 3e-3, 'transmit_bias': 0.01, 'transmit_p95': 5e-3,
+       'reflect_total': 0.02, 'reflect_part': 0.03, 'reflect_part_budget': 1e-3, 'reflect_cosine': 5.0, 'reflect_plane': 5e-4,
+       'reflect_budget': {'canyon': 9e-3, 'canopy': 5e-3, 'glass_canopy': 5e-3}}   # reflect_*: layer_reflect
 RGB_W = np.array([0.265074126, 0.670114631, 0.064811243])     # src/run.cpp bright(): Radiance CIE_rf / gf / bf
 ROWS, FAILS = [], []
 
@@ -419,19 +422,43 @@ def dc_values(dc, sky):
     return np.einsum('nbc,bc,c->n', dc.astype(np.float64), sky, RGB_W)
 
 
+def dc_ref(scene, ab, ad, stem, bins=slice(None)):
+    """reference.py's rcontrib -ab ab -ad ad coefficients of scene under stem's summed gendaymtx skies (sun binned), over
+    bins (all; slice(0, 1) = the ground) -> [N x 2]: radiation kWh/m2 (-O1 / 1000), mean illuminance lux (-O0 x 179 / rows)."""
+    sky = np.load(REF / 'epw' / stem / 'skysum_m1.npz')
+    dc = np.load(REF / 'scene' / scene / f'dc_ab{ab}_ad{ad}.npy')[:, bins]
+    return np.stack([dc_values(dc, sky['O1'][bins]) * 1e-3, dc_values(dc, sky['O0'][bins]) * 179 / float(sky['rows'])], axis=1)
+
+
+def optics_run(exe, scene, stem, bounces=0, m=65536):
+    """The CLI on a DC scene as rcontrib sees it -> (values, copy) [N x 2] radiation, illuminance: 64 samples per patch
+    of the MF 1 sky, sensors outside the scene, the fixture's --optics (--transmission on where one transmits).
+    bounces > 0 adds the reflected light of m paths per sensor and lists the sensors twice: the copy's paths are seeded
+    by other global sensor indices, an independent estimate of the same values (without bounces copy = values)."""
+    optics = json.loads((FIX / scene / 'fixture.json').read_text())['optics']
+    args = epw_arg(stem) + ['--quantity', 'radiation,illuminance', '--patch-samples', '64', '--sky-density', '1', '--no-self-occlude']
+    if optics:
+        args += ['--optics', ';'.join(f'{n}={r},{t},{k}' for n, (r, t, k) in optics.items())]
+    if any(t > 0 for _, t, _ in optics.values()):
+        args += ['--transmission', 'on']
+    files = scene_files(scene)
+    if bounces:
+        args += ['--bounces', str(bounces), '--bounce-samples', str(m)]
+        files = files[:1] * 2 + files[1:]   # sensors.obj twice, then --context
+    v = cli(exe, files, args, f'optics_{scene}_{stem}_b{bounces}' + (f'_m{m}' if bounces else ''))[1]
+    n = len(v) // 2 if bounces else len(v)
+    return v[:n], v[-n:]
+
+
 def layer_transmit(exe, epws, scenes):
     """Porous canopy (fixture.json optics) over ground sensors on nodni.epw (DNI 0: sky only), --transmission on vs
     rcontrib -ab 1 (trans: rho diffuse, tau straight through; -ab 1 holds no reflection, as ours without bounces).
     The reference is the -ad 32768 run; its per-sensor sigma comes from the -ad 8192 run, noise ~ 1/sqrt(ad):
     var(r8 - r32) = (4 + 1) var(r32)."""
-    optics = json.loads((FIX / 'canopy' / 'fixture.json').read_text())['optics']
-    _, ours, _ = cli(exe, scene_files('canopy'), ['--epw', str(DL / 'epw' / 'nodni.epw'), '--quantity', 'radiation,illuminance',
-                     '--transmission', 'on', '--patch-samples', '64', '--sky-density', '1', '--no-self-occlude', '--optics',
-                     ';'.join(f'{n}={r},{t},{k}' for n, (r, t, k) in optics.items())], 'transmit_canopy')
-    sky = np.load(REF / 'epw' / 'nodni' / 'skysum_m1.npz')
-    lo, hi = (np.load(REF / 'scene' / 'canopy' / f'dc_ab1_ad{ad}.npy') for ad in (8192, 32768))
-    for col, (q, key, scale) in enumerate((('radiation', 'O1', 1e-3), ('illuminance', 'O0', 179 / float(sky['rows'])))):
-        r8, ref = dc_values(lo, sky[key]) * scale, dc_values(hi, sky[key]) * scale
+    ours, _ = optics_run(exe, 'canopy', 'nodni')
+    lo, hi = (dc_ref('canopy', 1, ad, 'nodni') for ad in (8192, 32768))
+    for col, q in enumerate(('radiation', 'illuminance')):
+        r8, ref = lo[:, col], hi[:, col]
         sigma = np.sqrt(np.mean((r8 / ref - 1) ** 2) / 5)
         rel = np.abs(ours[:, col] / ref - 1)
         report('8 transmit', f'canopy nodni {q}', '|sum ours / sum rcontrib - 1|', abs(ours[:, col].sum() / ref.sum() - 1), TOL['transmit_bias'])
@@ -442,8 +469,67 @@ def layer_transmit(exe, epws, scenes):
         report('8 transmit', f'canopy nodni {q}', 'reference per-sensor 3 sigma (-ad 8192 vs 32768)', 3 * sigma, TOL['transmit_p95'], hard=False)
 
 
+def noise(d, tot, k):
+    """Per-sensor sigma of an estimate (rms over the sensors, relative to tot) from d = its difference to an independent
+    second estimate of variance (k - 1) x its own: k 2 for ours' copy, 5 for rcontrib at a quarter of the -ad."""
+    return math.sqrt(np.mean((d / tot) ** 2) / k)
+
+
+def layer_reflect(exe, epws, scenes):
+    """Reflected light: --bounces N = 1, 2 with 65536 paths per sensor against rcontrib -ab N + 1 with the fixtures'
+    materials, radiation and illuminance. Closed forms first: one reflection off a 2 km plane must follow the cosine law
+    in rcontrib (a check of the reference) and give rho x ours' own unobstructed horizontal value. Totals on nodni.epw,
+    sky only (ours' direct pass takes the exact sun, rcontrib the binned one): canyon (N = 0 too: the physical direct
+    pass on walls), porous canopy, glass canopy, whose reflected light is its mirror, in rcontrib's -ab 1 ground bin.
+    Reflected part ours N - ours 0 against DC ab N + 1 - DC ab 1 on the --epw years, the sun binned on both sides as
+    gendaymtx does, glass-free scenes (rcontrib -ab 1 holds the glass mirror, ours' N = 0 does not). Per sensor the
+    p95 of |ours - ref| / the sensor's reference total is held to a budget + 3 sigma, sigma = the measured noise of both
+    sides: ours' from a copy of the sensors in the same run (independent seeds), rcontrib's from -ad 8192 vs 32768."""
+    m = 65536
+    dc = lambda scene, ab, stem, bins=slice(None): [dc_ref(scene, ab, ad, stem, bins) for ad in (8192, 32768)]
+
+    def check(case, ours, copy, lo, hi, tot, bias, budget, what):
+        """ours / copy: the CLI's two estimates, lo / hi: rcontrib at -ad 8192 / 32768, tot: the reference totals, [N x 2]"""
+        for c, q in enumerate(('radiation', 'illuminance')):
+            s3 = 3 * math.hypot(noise(ours[:, c] - copy[:, c], tot[:, c], 2), noise(lo[:, c] - hi[:, c], tot[:, c], 5))
+            report('9 reflect', f'{case} {q}', f'|sum ours / sum rcontrib - 1| ({what})', abs(ours[:, c].sum() / hi[:, c].sum() - 1), bias)
+            report('9 reflect', f'{case} {q}', 'per-sensor p95 |ours - ref| / ref total', np.percentile(np.abs(ours[:, c] - hi[:, c]) / tot[:, c], 95), budget + s3)
+            report('9 reflect', f'{case} {q}', '3 sigma: ours (copy) + rcontrib (-ad)', s3, budget + s3, hard=False)
+    # closed forms: one reflection off a 2 km plane (rho 0.2) under down-facing sensors. rcontrib's share per MF 1 row is
+    # the cosine law, rho pi (sin^2 a1 - sin^2 a0), within the noise of its single-sample reflections (reference.py -lw);
+    # ours is rho x its own unobstructed horizontal value (the bounce rows bin the sky its direct pass sees)
+    p1, p2 = (np.load(REF / 'scene' / 'plane' / f'dc_ab{ab}_ad32768.npy').astype(np.float64) @ RGB_W for ab in (1, 2))
+    law = np.diff(np.sin(np.minimum(np.arange(9) * math.pi / 15, math.pi / 2)) ** 2)
+    share = np.bincount(np.repeat(np.arange(8), [30, 30, 24, 24, 18, 12, 6, 1]), (p2 - p1)[:, 1:].mean(0)) / (0.2 * math.pi)
+    report('9 reflect', 'plane rcontrib -ab 2', 'max row |share - cosine law| / sigma',
+           (np.abs(share - law) / np.sqrt(law * (1 - law) / (len(p1) * 32768))).max(), TOL['reflect_cosine'])
+    flat, plane = optics_run(exe, 'flat', 'nodni')[0], optics_run(exe, 'plane', 'nodni', 1, m)[0]
+    for c, q in enumerate(('radiation', 'illuminance')):
+        report('9 reflect', f'plane nodni N=1 {q}', '|mean ours / (0.2 x ours flat) - 1|', abs(plane[:, c].mean() / (0.2 * flat[:, c].mean()) - 1), TOL['reflect_plane'])
+    # totals on the sky-only year. Budgets of the direct pass, which carries most of each total: the canopies' is layer
+    # 8's; the canyon's walls see the sky at the NOAA apparent sun (gendaymtx: sun.c) up to -0.41 % off (a bare south
+    # wall against rcontrib) and cut patches that 64 samples resolve to p95 0.54 % (0.15 % at 4096, rcontrib's noise)
+    for scene in ('canyon', 'canopy', 'glass_canopy'):
+        for n in (0, 1, 2) if scene == 'canyon' else (1, 2):
+            lo, hi = dc(scene, n + 1, 'nodni')
+            check(f'{scene} nodni N={n}', *optics_run(exe, scene, 'nodni', n, m), lo, hi, hi, TOL['transmit_bias' if n == 0 else 'reflect_total'],
+                  TOL['reflect_budget'][scene], 'total')
+    # reflected parts. Budget 0.1 % of the total: ours bins the sun at the NOAA apparent position, gendaymtx at sun.c
+    # (<= 0.9 % of a canyon wall's reflected light, <= 0.06 % of its total). The glass canopy's reflected light is its
+    # mirror, which rcontrib -ab 1 holds in the ground bin (the sensors face up: nothing else lands there)
+    o0, (ours, copy) = optics_run(exe, 'glass_canopy', 'nodni')[0], optics_run(exe, 'glass_canopy', 'nodni', 1, m)
+    check('glass_canopy nodni N=1 mirror', ours - o0, copy - o0, *dc('glass_canopy', 1, 'nodni', slice(0, 1)), dc_ref('glass_canopy', 1, 32768, 'nodni'),
+          TOL['reflect_part'], TOL['reflect_part_budget'], 'reflected')
+    for scene in ('canyon', 'canopy'):
+        for stem in epws:
+            o0, (lo1, hi1) = optics_run(exe, scene, stem)[0], dc(scene, 1, stem)
+            for n in (1, 2):
+                (ours, copy), (lo, hi) = optics_run(exe, scene, stem, n, m), dc(scene, n + 1, stem)
+                check(f'{scene} {stem} N={n}', ours - o0, copy - o0, lo - lo1, hi - hi1, hi, TOL['reflect_part'], TOL['reflect_part_budget'], 'reflected')
+
+
 LAYERS = {'sky': layer_sky, 'sun': layer_sun, 'bits': layer_bits, 'e2e': layer_e2e, 'usd': layer_usd, 'analytic': layer_analytic,
-          'clearsky': layer_clearsky, 'transmit': layer_transmit}
+          'clearsky': layer_clearsky, 'transmit': layer_transmit, 'reflect': layer_reflect}
 
 
 # ---------------------------------------------------------------- self-test of the parsers on synthetic data

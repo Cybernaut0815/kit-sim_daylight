@@ -3,7 +3,7 @@
 plus usd_xform/usd_xform.usda (the box scene re-authored in USD for the Python binding, compare.py layer 6).
 fixture.json holds the raw vertices / faces and the ladybug sensors (face_centroids / face_normals / vertex_normals)
 that compare.py uses for the direction/edge checks (layers 4a, 4b, 6), and `optics` {mesh: [rho, tau, kind]} for the
-meshes that are not the core default (opaque rho 0.2): the --optics rows and the Radiance materials (layer 8)."""
+meshes that are not the core default (opaque rho 0.2): the --optics rows and the Radiance materials (layers 8, 9)."""
 import json
 import math
 from pathlib import Path
@@ -108,10 +108,16 @@ def scene_canyon():
             'context': [(f'{n}_wall', merge([g])) for n, g in walls] + [('ground', merge([ground]))]}
 
 
-# canopy: compare.py transmit; glass_canopy and canyon: for the reflected-light layer
+def scene_plane():
+    """Closed form for one reflection: flat's sensors 1 m above a 2 km plane (context, opaque rho 0.2), facing down."""
+    return {'sensors': [('plane_sensors', merge([grid((-5, -5, 1), (1, 0, 0), (0, 1, 0), 10, 10, 1, (0, 0, -1))]))],
+            'context': [('plane', merge([grid((-1000, -1000, 0), (1, 0, 0), (0, 1, 0), 1, 1, 2000, (0, 0, 1))]))]}
+
+
+# canopy: compare.py transmit; glass_canopy, canyon and plane: the reflected-light layer
 SCENES = {'flat': scene_flat, 'flat_tri': lambda: scene_flat(True), 'walls': scene_walls, 'box': scene_box,
           'tilt30': scene_tilt30, 'overhang': scene_overhang, 'canopy': lambda: scene_canopy((0.2, 0.5, 'porous')),
-          'glass_canopy': lambda: scene_canopy((0, 0.64, 'glass')), 'canyon': scene_canyon}
+          'glass_canopy': lambda: scene_canopy((0, 0.64, 'glass')), 'canyon': scene_canyon, 'plane': scene_plane}
 
 
 def write_obj(path, meshes):
