@@ -16,6 +16,8 @@ uv run compare.py selftest               # parser + residual-decomposition unit 
 uv run compare.py all --exe ../build/RelWithDebInfo/daylight.exe      # layers 1a, 2, 3, 4a, 4b, 4c, 6, 7; exit 1 on hard failures
 uv run compare.py bits --exe ... --scene box --epw USA_MA_Boston-City.WSO_TMY
 uv run python -I ingest.py --exe ../build/RelWithDebInfo/daylight.exe       # 1M-quad ingest benchmark -> _out/ingest/, markdown table
+uv run python -I golden.py record        # once, on main: byte goldens of ~30 CLI cases -> _out/golden/<case>/ (~20 s)
+uv run python -I golden.py check         # rerun them into a temp dir, list every differing file, exit 1 on any
 ```
 
 Run the scripts with `uv run python -I script.py` if you want the interpreter isolated from the current directory
@@ -35,6 +37,7 @@ the same command a user runs on their own stage (see `bindings/python/README.md`
 | `_out/ref/scene/<scene>/` | `imtx_m{mf}_n{north}_{face,vertex}.npy` (RadiationStudy intersection matrix, float cos x visible, columns `[sky | ground]`), `rad_<stem>_<tag>.npy`, `sun_imtx_<stem>_*.npy` (bool `[N x n_up]`), `sunhours_<stem>_*.npy` |
 | `_out/ref/index.json` | file index with timings |
 | `_out/run/<case>/` | CLI outputs per compare case (`out.txt`, `out.txt.json`, `bits.npy`, `sky.txt`, `sun.txt`) |
+| `_out/golden/<case>/` | golden.py byte goldens: `out.npy` + `out.npy.json`, `series.npy` + `series.npy.hoys.txt`, `bits.npy` where the case asks; `recorded.txt` = commit + exe they came from. Variants (slot-block `.dmesh`, opaque `--optics`, `--transmission off`, `--bounces 0`) are compared to their base case's files and run once `daylight --help` lists their flags |
 
 Scenes (tri/quad only): `flat` 10x10 m, 1 m quads; `flat_tri`; `walls` N/E/S/W 10x3 m, 0.5 m cells, outward normals,
 mesh order north, east, south, west; `box` = flat + two open 4x4x6 m boxes (no bottom face) at (0,6) and (-8,0);
