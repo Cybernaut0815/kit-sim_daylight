@@ -57,17 +57,27 @@ __device__ __forceinline__ float dotf(float3 a, float3 b) {
   return __fadd_rn(__fadd_rn(__fmul_rn(a.x, b.x), __fmul_rn(a.y, b.y)), __fmul_rn(a.z, b.z));
 }
 
-__global__ void k_reduce(unsigned nc, unsigned nWords, const unsigned* bits, const float3* N, const float3* D,
+// k_reduce / k_series read visibility through an accessor V: mask(w, i) = the visible directions 32w..32w+31 of sensor
+// i as bits, at(d, i) = the fraction of visible direction d that arrives. at() scales the first factor of each product,
+// where the exact 1.0f of Bits leaves the rounding and fma contraction of the bit walk unchanged.
+struct Bits {   // gpu_trace's word-major bits[w*nc + i]
+  const unsigned* b; unsigned nc;
+  __device__ __forceinline__ unsigned mask(unsigned w, unsigned i) const { return b[w * nc + i]; }
+  __device__ __forceinline__ float at(unsigned, unsigned) const { return 1.f; }
+};
+
+template <class V>
+__global__ void k_reduce(unsigned nc, unsigned nWords, V vis, const float3* N, const float3* D,
                          const float* W, int useCos, double* out) {
   const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= nc) return;
   const float3 n = N[i];
   double acc = 0;
   for (unsigned w = 0; w < nWords; ++w) {
-    unsigned m = bits[w * nc + i];
+    unsigned m = vis.mask(w, i);
     while (m) {
       const unsigned d = w * 32 + (__ffs(m) - 1); m &= m - 1;
-      acc += (double)(useCos ? fmaxf(dotf(n, D[d]), 0.f) : 1.f) * W[d];
+      acc += (double)((useCos ? fmaxf(dotf(n, D[d]), 0.f) : 1.f) * vis.at(d, i)) * W[d];
     }
   }
   out[i] = acc;
@@ -76,7 +86,8 @@ __global__ void k_reduce(unsigned nc, unsigned nWords, const unsigned* bits, con
 // E[i*T + t] = sum_{sky bits} max(0,cos)*wsky*S[row,t] + G*g[t] + sum_{sun bits} max(0,cos)*sunW at sunStep.
 // t in tiles of 32 held in registers; the bit walk is repeated per tile. ponytail: S read through L1 (broadcast),
 // shared-memory tiling if the series pass ever dominates.
-__global__ void k_series(unsigned nc, const unsigned* bits, const float3* N, const float3* D, unsigned nSky,
+template <class V>
+__global__ void k_series(unsigned nc, V vis, const float3* N, const float3* D, unsigned nSky,
                          const int* row, const float* wsky, const float* S, int T, const float* g, const float* G,
                          unsigned sun0, unsigned nSun, const int* sunStep, const float3* sunVec, const float* sunW,
                          float* E) {
@@ -89,11 +100,11 @@ __global__ void k_series(unsigned nc, const unsigned* bits, const float3* N, con
 #pragma unroll
     for (int tt = 0; tt < 32; ++tt) e[tt] = 0.f;
     for (unsigned w = 0; w * 32 < nSky; ++w) {
-      unsigned m = bits[w * nc + i];
+      unsigned m = vis.mask(w, i);
       while (m) {
         const unsigned d = w * 32 + (__ffs(m) - 1); m &= m - 1;
         if (d >= nSky) break;
-        const float c = fmaxf(dotf(n, D[d]), 0.f) * wsky[d];
+        const float c = fmaxf(dotf(n, D[d]), 0.f) * vis.at(d, i) * wsky[d];
         const float* s = S + (size_t)row[d] * T + t0;
 #pragma unroll
         for (int tt = 0; tt < 32; ++tt) if (t0 + tt < T) e[tt] += c * s[tt];
@@ -103,7 +114,7 @@ __global__ void k_series(unsigned nc, const unsigned* bits, const float3* N, con
   }
   for (unsigned j = 0; j < nSun; ++j) {
     const unsigned d = sun0 + j;
-    if ((bits[(d >> 5) * nc + i] >> (d & 31)) & 1u) Ei[sunStep[j]] += fmaxf(dotf(n, sunVec[j]), 0.f) * sunW[j];
+    if ((vis.mask(d >> 5, i) >> (d & 31)) & 1u) Ei[sunStep[j]] += fmaxf(dotf(n, sunVec[j]), 0.f) * vis.at(d, i) * sunW[j];
   }
 }
 
@@ -284,7 +295,7 @@ bool gpu_reduce(Gpu& g, size_t nc, const float* W, bool useCos, double* out, std
   if (nc == 0) return true;
   if (!grow(&g.dScratch, &g.scratchCap, g.nDir * sizeof(float), err) || !grow(&g.dOut, &g.outCap, nc * sizeof(double), err)) return false;
   CU(cudaMemcpy(g.dScratch, W, g.nDir * sizeof(float), cudaMemcpyHostToDevice));
-  k_reduce<<<unsigned((nc + 255) / 256), 256>>>((unsigned)nc, (unsigned)g.nWords, g.dBits, g.dN + g.i0, g.dD,
+  k_reduce<<<unsigned((nc + 255) / 256), 256>>>((unsigned)nc, (unsigned)g.nWords, Bits{g.dBits, (unsigned)nc}, g.dN + g.i0, g.dD,
                                                  static_cast<const float*>(g.dScratch), useCos, static_cast<double*>(g.dOut));
   CU(cudaGetLastError());
   CU(cudaMemcpy(out, g.dOut, nc * sizeof(double), cudaMemcpyDeviceToHost));
@@ -304,7 +315,7 @@ bool gpu_series(Gpu& g, size_t nc, const SeriesIn& in, float* E, std::string& er
   if (!grow(&g.dScratch, &g.scratchCap, total, err) || !grow(&g.dOut, &g.outCap, nc * T * sizeof(float), err)) return false;
   CU(cudaMemcpy(g.dScratch, h.data(), total, cudaMemcpyHostToDevice));
   const char* b = static_cast<const char*>(g.dScratch);
-  k_series<<<unsigned((nc + 255) / 256), 256>>>((unsigned)nc, g.dBits, g.dN + g.i0, g.dD, in.nSky,
+  k_series<<<unsigned((nc + 255) / 256), 256>>>((unsigned)nc, Bits{g.dBits, (unsigned)nc}, g.dN + g.i0, g.dD, in.nSky,
       reinterpret_cast<const int*>(b + off[0]), reinterpret_cast<const float*>(b + off[1]), reinterpret_cast<const float*>(b + off[2]),
       in.T, reinterpret_cast<const float*>(b + off[3]), reinterpret_cast<const float*>(b + off[4]), in.sun0, in.nSun,
       reinterpret_cast<const int*>(b + off[5]), reinterpret_cast<const float3*>(b + off[6]), reinterpret_cast<const float*>(b + off[7]),
