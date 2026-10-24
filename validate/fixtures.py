@@ -2,7 +2,8 @@
 """Scenes as ladybug-geometry Mesh3D -> validate/_out/fixtures/<scene>/{sensors.obj, context.obj, fixture.json}
 plus usd_xform/usd_xform.usda (the box scene re-authored in USD for the Python binding, compare.py layer 6).
 fixture.json holds the raw vertices / faces and the ladybug sensors (face_centroids / face_normals / vertex_normals)
-that compare.py uses for the direction/edge checks (layers 4a, 4b, 6)."""
+that compare.py uses for the direction/edge checks (layers 4a, 4b, 6), and `optics` {mesh: [rho, tau, kind]} for the
+meshes that are not the core default (opaque rho 0.2): the --optics rows and the Radiance materials (layer 8)."""
 import json
 import math
 from pathlib import Path
@@ -88,8 +89,29 @@ def scene_overhang():
     return {'sensors': [('overhang', merge([wall, slab]))], 'context': []}
 
 
+def scene_canopy(optics):
+    """flat's ground sensors under a 6 x 6 m single sheet at 3 m, off centre (x -2..4, y -3..3), 1 m quads facing down;
+    optics = (rho, tau, kind) of the sheet."""
+    s = scene_flat()
+    s['context'] = [('canopy', merge([grid((-2, -3, 3), (1, 0, 0), (0, 1, 0), 6, 6, 1, (0, 0, -1))]))]
+    s['optics'] = {'canopy': optics}
+    return s
+
+
+def scene_canyon():
+    """Street canyon, H/W 1: two facing 20 x 10 m walls 10 m apart and the ground between them (context, opaque rho 0.2),
+    a sensor grid on each wall (1 m cells, facing the street; runs use --no-self-occlude)."""
+    walls = [('canyon_s', grid((-10, -5, 0), (1, 0, 0), (0, 0, 1), 20, 10, 1, (0, 1, 0))),
+             ('canyon_n', grid((-10, 5, 0), (1, 0, 0), (0, 0, 1), 20, 10, 1, (0, -1, 0)))]
+    ground = grid((-10, -5, 0), (1, 0, 0), (0, 1, 0), 20, 10, 1, (0, 0, 1))
+    return {'sensors': [(n, merge([g])) for n, g in walls],
+            'context': [(f'{n}_wall', merge([g])) for n, g in walls] + [('ground', merge([ground]))]}
+
+
+# canopy: compare.py transmit; glass_canopy and canyon: for the reflected-light layer
 SCENES = {'flat': scene_flat, 'flat_tri': lambda: scene_flat(True), 'walls': scene_walls, 'box': scene_box,
-          'tilt30': scene_tilt30, 'overhang': scene_overhang}
+          'tilt30': scene_tilt30, 'overhang': scene_overhang, 'canopy': lambda: scene_canopy((0.2, 0.5, 'porous')),
+          'glass_canopy': lambda: scene_canopy((0, 0.64, 'glass')), 'canyon': scene_canyon}
 
 
 def write_obj(path, meshes):
@@ -166,7 +188,7 @@ def main():
         if scene['context']:
             write_obj(d / 'context.obj', scene['context'])
         js = {'sensors': [mesh_json(n, m) for n, m in scene['sensors']],
-              'context': [mesh_json(n, m) for n, m in scene['context']]}
+              'context': [mesh_json(n, m) for n, m in scene['context']], 'optics': scene.get('optics', {})}
         (d / 'fixture.json').write_text(json.dumps(js))
         ns = sum(len(m.faces) for _, m in scene['sensors'])
         nc = sum(len(m.faces) for _, m in scene['context'])

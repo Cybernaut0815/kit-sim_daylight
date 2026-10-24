@@ -2,6 +2,7 @@
 """Reference data for compare.py -> validate/_out/ref/. Needs setup.py and fixtures.py first.
 
   uv run reference.py [--epw STEM ...] [--scene NAME ...] [--all]      default: Boston + Chicago, all scenes
+  uv run reference.py --epw --scene canopy                              only the rcontrib reference of layer 8
 
 Per EPW (<ref>/epw/<stem>/): gendaymtx -m 1/2 -d/-s -O1 -A ASCII outputs (sky_m{1,2}_{d,s}_O1_A.txt), gendaymtx -D
 suns (suns_D.npz), ladybug Sunpath (sunpath.npz), pvlib SPA (pvlib.npz), and ladybug SkyMatrix kWh/m2 per patch
@@ -9,9 +10,15 @@ suns (suns_D.npz), ladybug Sunpath (sunpath.npz), pvlib SPA (pvlib.npz), and lad
 Per scene (<ref>/scene/<name>/): intersection matrices (imtx_m{mf}_n{north}_{face,vertex}.npy, float cos*visible,
 columns [sky | ground]) and per EPW radiation values (rad_<stem>_m{mf}_n{north}_{face,vertex}.npy); DirectSunStudy
 per site (sun_imtx_<stem>_{face,vertex}.npy bool [N x n_up], sunhours_<stem>_{face,vertex}.npy).
+DC_SCENES instead get rcontrib daylight coefficients with the fixture's materials (scene.rad, scene.oct,
+dc_ab1_ad{8192,32768}.npy float32 [N x 146 bins x RGB], bin 0 = ground), and nodni.epw its summed gendaymtx skies
+(<ref>/epw/nodni/skysum_m1.npz: O1, O0 float64 [146 x RGB], rows).
 index.json lists every file with its parameters and timings."""
 import argparse
 import json
+import math
+import os
+import re
 import subprocess
 import sys
 import time
@@ -34,9 +41,13 @@ folders.radiance_path = (DL / 'radiance_path.txt').read_text().strip()   # befor
 from ladybug_radiance.skymatrix import SkyMatrix
 from ladybug_radiance.study.directsun import DirectSunStudy
 from ladybug_radiance.study.radiation import RadiationStudy
-GENDAYMTX = str(Path(folders.radbin_path) / 'gendaymtx.exe')
+GENDAYMTX, RCONTRIB, OCONV = (str(Path(folders.radbin_path) / f'{x}.exe') for x in ('gendaymtx', 'rcontrib', 'oconv'))
+RAYPATH = str(Path(folders.radiance_path) / 'lib')                     # reinhart.cal
 DEFAULT_EPWS = ['USA_MA_Boston-City.WSO_TMY', 'USA_IL_Chicago-OHare.Intl.AP.725300_TMY3']
 SCENES = ['flat', 'flat_tri', 'walls', 'box', 'tilt30', 'overhang']
+DC_SCENES = ['canopy']      # rcontrib with materials on nodni.epw skies (compare.py transmit)
+DC_AD = (8192, 32768)       # two -ad: their difference measures rcontrib's noise
+SKYGLOW = ['void glow skyglow 0 0 4 1 1 1 0', 'skyglow source sky 0 0 4 0 0 1 180', 'skyglow source ground 0 0 4 0 0 -1 180']
 index = {'epw': {}, 'scene': {}, 'timings': {}}
 
 
@@ -164,10 +175,71 @@ def scene_refs(name, epws):
     index['scene'][name] = files
 
 
+def rad_matrix(out):
+    """Radiance float matrix output (text header up to the first blank line, then little-endian float32 RGB) -> [rows x
+    NCOLS x 3]: gendaymtx [bins x steps], rcontrib [sensors x bins]."""
+    head, data = out.split(b'\n\n', 1)
+    assert b'FORMAT=float' in head and b'NCOMP=3' in head, head[-300:]
+    return np.frombuffer(data, '<f4').reshape(-1, int(re.search(rb'NCOLS=(\d+)', head)[1]), 3)
+
+
+def sky_sums(stem):
+    """gendaymtx -m 1 -O1 / -O0 (sun binned, ground 0.2) of the ladybug-written .wea, summed over the rows."""
+    d = REF / 'epw' / stem
+    d.mkdir(parents=True, exist_ok=True)
+    wea = Wea.from_epw_file(str(DL / 'epw' / f'{stem}.epw')).write(str(d / 'wea'))
+    m = {f'O{o}': rad_matrix(gendaymtx(['-m', '1', f'-O{o}', '-of', wea])) for o in (1, 0)}
+    np.savez(d / 'skysum_m1.npz', rows=m['O1'].shape[1], **{k: v.sum(axis=1, dtype=np.float64) for k, v in m.items()})
+    index['epw'].setdefault(stem, {})['skysum_m1'] = 'skysum_m1.npz'
+
+
+def material(name, optics):
+    """Radiance material of fixture optics (rho, tau, kind); None = the core default, opaque rho 0.2."""
+    rho, tau, kind = optics or (0.2, 0, 'porous')
+    if kind == 'glass':   # transmissivity from the transmittance at normal incidence, n 1.52 (src/glass.h tn_from_Tn)
+        tn = (math.sqrt(.8402528435 + .0072522239 * tau * tau) - .9166530661) / .0036261119 / tau
+        return f'void glass {name} 0 0 3 {tn:.10g} {tn:.10g} {tn:.10g}'
+    if tau > 0:           # grey c, trans t: diffuse reflectance c (1 - t) = rho, specular (straight) transmittance c t = tau
+        c = rho + tau
+        return f'void trans {name} 0 0 7 {c:.10g} {c:.10g} {c:.10g} 0 0 {tau / c:.10g} 1'
+    return f'void plastic {name} 0 0 5 {rho:.10g} {rho:.10g} {rho:.10g} 0 0'
+
+
+def dc_refs(name, ab=1):
+    """rcontrib -I+ daylight coefficients (Reinhart MF 1 bins + ground bin 0) at the fixture's face centroids / normals,
+    the context meshes as Radiance polygons with their optics. -ab 1: the sky through transmitting surfaces, no
+    reflection (the skyglow sources are never direct sources)."""
+    js = json.loads((FIX / name / 'fixture.json').read_text())
+    d = REF / 'scene' / name
+    d.mkdir(parents=True, exist_ok=True)
+    rad = list(SKYGLOW)
+    for m in js['context']:
+        rad.append(material(m['name'], js['optics'].get(m['name'])))
+        rad += [f'{m["name"]} polygon {m["name"]}.{k} 0 0 {3 * len(f)} ' + ' '.join(f'{c:.17g}' for i in f for c in m['vertices'][i])
+                for k, f in enumerate(m['faces'])]
+    (d / 'scene.rad').write_text('\n'.join(rad) + '\n')
+    with open(d / 'scene.oct', 'wb') as f:
+        subprocess.run([OCONV, str(d / 'scene.rad')], stdout=f, check=True)
+    pts = [p + n for m in js['sensors'] for p, n in zip(m['face_centroids'], m['face_normals'])]
+    inp = ''.join(' '.join(f'{x:.17g}' for x in q) + '\n' for q in pts).encode()
+    files = {}
+    for ad in DC_AD:
+        cmd = [RCONTRIB, '-I+', '-ab', str(ab), '-ad', str(ad), '-lw', f'{1e-5 * 8192 / ad:.3g}', '-e', 'MF:1', '-f',
+               'reinhart.cal', '-bn', 'Nrbins', '-b', 'rbin', '-m', 'skyglow', '-faf', str(d / 'scene.oct')]
+        r = timed(f'{name}/dc_ab{ab}_ad{ad}', lambda: subprocess.run(cmd, input=inp, capture_output=True, check=False,
+                                                                     env={**os.environ, 'RAYPATH': RAYPATH}))
+        assert r.returncode == 0, r.stderr.decode(errors='replace')[-500:]
+        dc = rad_matrix(r.stdout)
+        assert dc.shape == (len(pts), 146, 3), dc.shape
+        np.save(d / f'dc_ab{ab}_ad{ad}.npy', dc)
+        files[f'dc_ab{ab}_ad{ad}'] = {'file': f'dc_ab{ab}_ad{ad}.npy', 'cmd': ' '.join(['rcontrib'] + cmd[1:])}
+    index['scene'][name] = files
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--epw', nargs='*', default=DEFAULT_EPWS)
-    ap.add_argument('--scene', nargs='*', default=SCENES)
+    ap.add_argument('--scene', nargs='*', default=SCENES + DC_SCENES)
     ap.add_argument('--all', action='store_true', help='every EPW in _dl/epw')
     a = ap.parse_args()
     epws = sorted(p.stem for p in (DL / 'epw').glob('*.epw')) if a.all else a.epw
@@ -178,9 +250,12 @@ def main():
         print(stem)
         epw_refs(stem)
         (REF / 'index.json').write_text(json.dumps(index, indent=1))
+    if set(a.scene) & set(DC_SCENES):
+        print('nodni')
+        sky_sums('nodni')
     for name in a.scene:
         print(name)
-        scene_refs(name, epws)
+        dc_refs(name) if name in DC_SCENES else scene_refs(name, epws)
         (REF / 'index.json').write_text(json.dumps(index, indent=1))
 
 

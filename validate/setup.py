@@ -16,7 +16,7 @@ DL = HERE / '_dl'
 EPW_DIR = DL / 'epw'
 RAD_DIR = DL / 'radiance'
 RAD_URL = 'https://github.com/LBNL-ETA/Radiance/releases/download/rad5R4/Radiance_4ee32974_Windows.zip'
-RAD_EXES = ['gendaymtx.exe', 'rcontrib.exe', 'oconv.exe', 'rad.exe', 'obj2mesh.exe']
+RAD_EXES = ['gendaymtx.exe', 'rcontrib.exe', 'rtrace.exe', 'oconv.exe', 'rad.exe', 'obj2mesh.exe']
 EPW_URLS = [
     'https://github.com/NREL/EnergyPlus/raw/develop/weather/USA_IL_Chicago-OHare.Intl.AP.725300_TMY3.epw',
     'https://climate.onebuilding.org/WMO_Region_5_Southwest_Pacific/SGP_Singapore/SGP_SG_Singapore-Changi.Intl.AP.486980_TMYx.zip',
@@ -53,6 +53,7 @@ def setup_radiance(shas):
     missing = [e for e in RAD_EXES if not (bin_dir / e).exists()]
     assert not missing, f'Radiance bin {bin_dir} lacks {missing}'
     root = bin_dir.parent
+    assert (root / 'lib' / 'reinhart.cal').exists(), f'{root / "lib"} lacks reinhart.cal (rcontrib -f, RAYPATH)'
     (DL / 'radiance_path.txt').write_text(str(root) + '\n')
     # rcontrib -version must say 5.4 (rad5R4); 6.x adds NAVERAGED= to the gendaymtx header -> ladybug misparses.
     ver = subprocess.run([str(bin_dir / 'rcontrib.exe'), '-version'], capture_output=True, text=True, check=False).stdout
@@ -101,6 +102,16 @@ def missing_epw(src, dst):
     dst.write_text('\n'.join(lines) + '\n')
 
 
+def nodni_epw(src, dst):
+    """Sky-only year for the rcontrib layers: DNI (EPW column 15, 1-based) 0, GHI (column 14) = DHI (column 16)."""
+    lines = src.read_text().splitlines()
+    for k in range(8, len(lines)):
+        f = lines[k].split(',')
+        f[13], f[14] = f[15], '0'
+        lines[k] = ','.join(f)
+    dst.write_text('\n'.join(lines) + '\n')
+
+
 def setup_epws(shas):
     EPW_DIR.mkdir(parents=True, exist_ok=True)
     for url in EPW_URLS:
@@ -123,6 +134,7 @@ def setup_epws(shas):
         (EPW_DIR / Path(p).name).write_text('\n'.join(lines) + '\n')
     leap_epw(EPW_DIR / CHICAGO, EPW_DIR / 'chicago_leap.epw')
     missing_epw(EPW_DIR / BOSTON, EPW_DIR / 'missing.epw')
+    nodni_epw(EPW_DIR / BOSTON, EPW_DIR / 'nodni.epw')
     from ladybug.wea import Wea
     for p in sorted(EPW_DIR.glob('*.epw')):
         w = Wea.from_epw_file(str(p))

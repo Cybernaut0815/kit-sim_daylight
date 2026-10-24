@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 """Run the daylight CLI against the references (plan section 8) and print a per-case table.
 
-  uv run compare.py <sky|sun|bits|e2e|usd|analytic|clearsky|all|selftest> --exe PATH [--epw STEM ...] [--scene NAME ...]
+  uv run compare.py <sky|sun|bits|e2e|usd|analytic|clearsky|transmit|all|selftest> --exe PATH [--epw STEM ...] [--scene NAME ...]
 
 Exit 1 on hard tolerance failures; informative rows never fail. `selftest` exercises the parsers and the residual
 decomposition on synthetic data and needs no CLI. Layer `usd` converts the usd_xform fixture with the Python binding
-(bindings/python, imported from this venv as `daylight`). CLI dump formats this script reads (contract with main.cpp):
+(bindings/python, imported from this venv as `daylight`). Layer `transmit` runs on nodni.epw whatever --epw says.
+CLI dump formats this script reads (contract with main.cpp):
   --out F         : one line per sensor, one `%.10g` per column; F.json manifest {"columns": [...], "duration_h",
                     "dirs": {"sky", "ground", "sun"}, "meshes": [{"name", "first", "count"}]}
-  --dump-bits F   : .npy uint32 [N x nWords]; direction d = word d//32, bit d%32; order [sky | ground | sun]
+  --dump-bits F   : .npy uint32 [N x nWords]; direction d = word d//32, bit d%32; order [sky | ground | sun]; with a
+                    transmitting slot uint8 [N x n_dir] transmittance x255 instead
   --dump-sky F    : ladybug mode only; a line '# gendaymtx -s -A ...' followed by one `R G B` (%.3g) line per
                     gendaymtx row (ground first), then '# gendaymtx -d -A ...' and the same for the direct part
   --dump-sun F    : '#' comment; one line per step, 12 columns: hoy month day hour alt azi up alt_rad azi_rad up_rad
@@ -33,7 +35,8 @@ LADYBUG = ['--mode', 'ladybug', '--no-self-occlude', '--offset', '0']
 TOL = {'sky_ascii_rows': 0, 'sun_noaa_deg': 1e-6, 'sun_flips': 0, 'sun_radiance_deg': 1e-4, 'sun_pvlib_deg': 0.02,
        'bits_mismatch': 1e-3, 'bits_edge_m': 1e-4, 'e2e_rel': 1e-3, 'e2e_residual_rel': 1e-3, 'sunhours_edge_h': 1.0,
        'analytic_flat': 0.01, 'analytic_direct': 1e-3, 'analytic_north': 1e-6, 'usd_rel': 1e-5,
-       'clearsky_rel': 5e-3, 'clearsky_sum_rel': 3e-3}
+       'clearsky_rel': 5e-3, 'clearsky_sum_rel': 3e-3, 'transmit_bias': 0.01}
+RGB_W = np.array([0.265074126, 0.670114631, 0.064811243])     # src/run.cpp bright(): Radiance CIE_rf / gf / bf
 ROWS, FAILS = [], []
 
 
@@ -50,8 +53,12 @@ def read_values(path):
 
 
 def read_bits(npy_path, n_dir):
-    """uint32 [N x nWords] -> bool [N x n_dir]; direction d = word d // 32, bit d % 32."""
+    """uint32 [N x nWords] -> bool [N x n_dir]; direction d = word d // 32, bit d % 32. uint8 [N x n_dir] (a transmitting
+    slot) -> the transmittance, float byte / 255."""
     words = np.load(npy_path)
+    if words.dtype == np.uint8:
+        assert words.shape[1] == n_dir, (words.shape, n_dir)
+        return words / 255.0
     assert words.dtype == np.uint32 and words.shape[1] * 32 >= n_dir, (words.dtype, words.shape, n_dir)
     bits = np.unpackbits(words.view(np.uint8), axis=1, bitorder='little')
     return bits[:, :n_dir].astype(bool)
@@ -407,8 +414,34 @@ def layer_clearsky(exe, epws, scenes):
     report('7 clearsky', 'boston', 'flat mean irradiance vs mean(dhi + dni sin alt) rel', abs(vals[:, 0].mean() / expect - 1), 0.02, hard=False)
 
 
+def dc_values(dc, sky):
+    """rcontrib coefficients [N x bins x RGB] . a summed gendaymtx sky [bins x RGB], channels weighted as bright()."""
+    return np.einsum('nbc,bc,c->n', dc.astype(np.float64), sky, RGB_W)
+
+
+def layer_transmit(exe, epws, scenes):
+    """Porous canopy (fixture.json optics) over ground sensors on nodni.epw (DNI 0: sky only), --transmission on vs
+    rcontrib -ab 1 (trans: rho diffuse, tau straight through; -ab 1 holds no reflection, as ours without bounces).
+    The reference is the -ad 32768 run; its per-sensor sigma comes from the -ad 8192 run, noise ~ 1/sqrt(ad):
+    var(r8 - r32) = (4 + 1) var(r32)."""
+    optics = json.loads((FIX / 'canopy' / 'fixture.json').read_text())['optics']
+    _, ours, _ = cli(exe, scene_files('canopy'), ['--epw', str(DL / 'epw' / 'nodni.epw'), '--quantity', 'radiation,illuminance',
+                     '--transmission', 'on', '--patch-samples', '64', '--sky-density', '1', '--no-self-occlude', '--optics',
+                     ';'.join(f'{n}={r},{t},{k}' for n, (r, t, k) in optics.items())], 'transmit_canopy')
+    sky = np.load(REF / 'epw' / 'nodni' / 'skysum_m1.npz')
+    lo, hi = (np.load(REF / 'scene' / 'canopy' / f'dc_ab1_ad{ad}.npy') for ad in (8192, 32768))
+    for col, (q, key, scale) in enumerate((('radiation', 'O1', 1e-3), ('illuminance', 'O0', 179 / float(sky['rows'])))):
+        r8, ref = dc_values(lo, sky[key]) * scale, dc_values(hi, sky[key]) * scale
+        sigma = np.sqrt(np.mean((r8 / ref - 1) ** 2) / 5)
+        rel = np.abs(ours[:, col] / ref - 1)
+        report('8 transmit', f'canopy nodni {q}', '|sum ours / sum rcontrib - 1|', abs(ours[:, col].sum() / ref.sum() - 1), TOL['transmit_bias'])
+        # ponytail: informative: ours' resolution (sky at the NOAA apparent sun, u8 transmittance, 64 samples per patch)
+        # is above the reference noise (validate/README.md); a hard per-sensor limit needs a budget for those terms
+        report('8 transmit', f'canopy nodni {q}', 'per-sensor p95 |ours / ref - 1| (limit 3 sigma)', np.percentile(rel, 95), 3 * sigma, hard=False)
+
+
 LAYERS = {'sky': layer_sky, 'sun': layer_sun, 'bits': layer_bits, 'e2e': layer_e2e, 'usd': layer_usd, 'analytic': layer_analytic,
-          'clearsky': layer_clearsky}
+          'clearsky': layer_clearsky, 'transmit': layer_transmit}
 
 
 # ---------------------------------------------------------------- self-test of the parsers on synthetic data
@@ -423,6 +456,12 @@ def selftest():
         words[i, d // 32] |= np.uint32(1) << np.uint32(d % 32)
     np.save(tmp / 'bits.npy', words)
     assert np.array_equal(read_bits(tmp / 'bits.npy', n_dir), bits)
+    np.save(tmp / 'bytes.npy', np.array([[0, 128, 255], [255, 64, 0]], np.uint8))
+    assert np.array_equal(read_bits(tmp / 'bytes.npy', 3), [[0, 128 / 255, 1], [1, 64 / 255, 0]])
+    dc = np.zeros((2, 146, 3), np.float32)
+    dc[0, 1], dc[1, 0] = 2.0, [1.0, 0.0, 0.0]
+    sky = np.ones((146, 3))
+    assert np.allclose(dc_values(dc, sky), [2.0, RGB_W[0]]) and abs(RGB_W.sum() - 1) < 1e-8
     (tmp / 'sky.txt').write_text(chr(10).join([
         '# mode ladybug mf 1', '# patch alt azi omega W', '0 5.9 0 0.0435 1 2 3', '# ground_weight 1',
         '# gendaymtx -s -A ascii rows (ground row first), %.3g', '0.1 0.2 0.3', '1e+03  2.5 3',
