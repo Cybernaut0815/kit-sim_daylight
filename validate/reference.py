@@ -207,8 +207,8 @@ def material(name, optics):
 
 def dc_refs(name, ab=1):
     """rcontrib -I+ daylight coefficients (Reinhart MF 1 bins + ground bin 0) at the fixture's face centroids / normals,
-    the context meshes as Radiance polygons with their optics. -ab 1: the sky through transmitting surfaces, no
-    reflection (the skyglow sources are never direct sources)."""
+    the context meshes as Radiance polygons with their optics. -ab 1: the sky through transmitting surfaces, no diffuse
+    reflection (the skyglow sources are never direct sources); glass mirrors are specular rays, traced at any -ab."""
     js = json.loads((FIX / name / 'fixture.json').read_text())
     d = REF / 'scene' / name
     d.mkdir(parents=True, exist_ok=True)

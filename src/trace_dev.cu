@@ -62,7 +62,7 @@ extern "C" __global__ void __anyhit__tr() {
   }
   T *= __uint_as_float(optixGetPayload_0());
   optixSetPayload_0(__float_as_uint(T));
-  if (T < 1.f / 510.f) optixTerminateRay();   // would round to byte 0: blocked
+  if (!(T >= 1.f / 510.f)) optixTerminateRay();   // would round to byte 0 (or NaN): blocked
   optixIgnoreIntersection();
 }
 

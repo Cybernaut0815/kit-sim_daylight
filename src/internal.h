@@ -98,7 +98,8 @@ size_t gpu_free_bytes();                 // free device memory (cudaMemGetInfo),
 bool gpu_set_scene(Gpu& g, const Sensors& s, const std::vector<float3>& dirs, std::string& err);   // resident sensors + directions
 // Trace sensors [i0, i0+nc) against all directions; bits stay on device, word-major bits[w*nc + i]. Ray flags with
 // any-hit on (gpu_ray_flags(.., true)): transmittance bytes[d*nc + i] instead (x255, 255 = 1), which reduce / series
-// then weight by. Adaptive TDR-safe sub-launches inside (first 4096 sensors timed, then scaled to ~150 ms per launch).
+// then weight by. Adaptive TDR-safe sub-launches inside (first 4096 sensors timed, then scaled to ~150 ms per launch;
+// byte mode: 2^13 threads first and at least, then 30 ms, at most doubling).
 bool gpu_trace(Gpu& g, size_t i0, size_t nc, unsigned rayFlags, std::string& err);
 // out[i] = sum_d T(i,d) * (useCos ? max(0, N_i . D_d) : 1) * W[d], double accumulation; W has nDir host floats.
 // T = the bit, or byte / 255.

@@ -12,6 +12,14 @@ RTX 2060 6 GB, driver 592.27, `--bench`, annual Boston EPW, radiation + sun hour
 Wall total includes the Perez sky model for 8760 steps, GAS build, tracing, reductions and output. Launches are
 chunked to ~150 ms (Windows TDR). Expect 5-10x on Ada/Blackwell GPUs.
 
+Transmission (`--transmission on`): the GAS gets per-triangle SBT offsets (one hit record per optics slot) only when a
+slot transmits; default runs keep the single-record layout (when it was chosen, offsets on every build cost 18 % GAS
+memory and ~6 % GRays/s). 1 M sensors / 12 M triangles with one of the boxes' 16 slots porous (`--optics
+bench_boxes/1=0.2,0.5,porous`): GAS 616 MB instead of 506, trace 2.9 s instead of 2.2 (1.65 GRays/s; transmittance
+bytes, 18 chunks of 256 MiB), wall 5.2 s instead of 3.9. Rays go on through every translucent crossing: with every box
+porous (100 k sensors, 0.3 M triangles) the trace runs at 0.5 GRays/s instead of 3.5. Byte-mode launches start at
+2^13 threads and aim at 30 ms, leaving room below the TDR when the crossings vary from sensor to sensor.
+
 Mesh transport (`validate/ingest.py`, 1000 x 1000 quad grid = 1 002 001 points / 2M triangles, one time step, same
 machine, seconds, best of 2; the USD rows need the `vs2022-usd` build):
 

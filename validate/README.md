@@ -41,7 +41,7 @@ the same command a user runs on their own stage (see `bindings/python/README.md`
 | `_out/ref/scene/canopy/` | `scene.rad` / `scene.oct` (sky glow + context polygons with their materials), `dc_ab1_ad{8192,32768}.npy` (rcontrib coefficients float32 `[N x 146 bins x RGB]`) |
 | `_out/ref/index.json` | file index with timings |
 | `_out/run/<case>/` | CLI outputs per compare case (`out.txt`, `out.txt.json`, `bits.npy`, `sky.txt`, `sun.txt`) |
-| `_out/golden/<case>/` | golden.py byte goldens: `out.npy` + `out.npy.json`, `series.npy` + `series.npy.hoys.txt`, `bits.npy` where the case asks; `recorded.txt` = commit + exe they came from. Variants (slot-block `.dmesh`, opaque `--optics`, `--transmission off`, `--bounces 0`) are compared to their base case's files and run once `daylight --help` lists their flags |
+| `_out/golden/<case>/` | golden.py byte goldens: `out.npy` + `out.npy.json`, `series.npy` + `series.npy.hoys.txt`, `bits.npy` where the case asks; `recorded.txt` = commit + exe they came from. Variants (slot-block `.dmesh`, opaque `--optics` with `--transmission` off and on, translucent rows with `--transmission off`, `--bounces 0`) are compared to their base case's files and run once `daylight --help` lists their flags |
 
 Scenes (tri/quad only): `flat` 10x10 m, 1 m quads; `flat_tri`; `walls` N/E/S/W 10x3 m, 0.5 m cells, outward normals,
 mesh order north, east, south, west; `box` = flat + two open 4x4x6 m boxes (no bottom face) at (0,6) and (-8,0);
@@ -68,7 +68,7 @@ them (context, opaque), a sensor grid on each wall (1 m cells). The last two are
 | 4c physical | ladybug | `--mode physical` K=1 / K=4 mean rel diff | 5 % | info |
 | 6 usd | ourselves | `usd_xform.usda` converted by `python -m daylight` (bindings/python) to `.dmesh` + `meshes.json` vs the box OBJ fixtures, both in `--mode ladybug --cull-backfaces`: sensor count; sensors differing > 1e-5 rel; sky/ground bit differences must be edge-grazing rays; sun bits | equal; 5 %; 1e-4 m; 0 | yes |
 | 7 clearsky | pvlib `Location.get_clearsky(model='ineichen', linke_turbidity=3)` on the same 8760 mid-hours (SPA, year 2017) | `--clear-sky --lat 42.35 --lon -71.07 --tz -5` dumped DNI / DHI (`--dump-sun` columns 11-12): max rel diff where pvlib apparent elevation > 5 deg; annual sum rel diff; rows zero on one side and > 1 W/m2 on the other; flat `--quantity irradiance` vs `mean(DHI + DNI sin alt)` | 0.5 %; 0.3 %; 10 (info); 2 % (info) | yes / info |
-| 8 transmit | rcontrib `-ab 1` with materials, gendaymtx `-O1` / `-O0` skies of `nodni.epw` | canopy, `--transmission on --patch-samples 64 --sky-density 1 --no-self-occlude` + its `--optics`, radiation and illuminance against the `-ad 32768` run: `\|sum ours / sum ref - 1\|`; per-sensor p95 of `\|ours / ref - 1\|`, limit 3 sigma (rcontrib's per-sensor sigma from `-ad 8192` vs `32768`, noise ~ 1/sqrt(ad)) | 1 %; 3 sigma (info) | yes / info |
+| 8 transmit | rcontrib `-ab 1` with materials, gendaymtx `-O1` / `-O0` skies of `nodni.epw` | canopy, `--transmission on --patch-samples 64 --sky-density 1 --no-self-occlude` + its `--optics`, radiation and illuminance against the `-ad 32768` run: `\|sum ours / sum ref - 1\|`; per-sensor p95 of `\|ours / ref - 1\|` (budget below); 3 sigma of rcontrib's per-sensor noise (`-ad 8192` vs `32768`, noise ~ 1/sqrt(ad)) | 1 %; 0.5 %; 0.5 % | yes / yes / info |
 
 Layer 7 needs no EPW reference: the clear-sky weather is synthetic (Ineichen-Perez, Linke turbidity 3, sea level).
 
@@ -86,13 +86,14 @@ RAYPATH=_dl/radiance/lib rcontrib -I+ -ab 1 -ad AD -lw 1e-5*8192/AD -e MF:1 -f r
 the sky through the canopy and no reflection, as the CLI without bounces. compare.py multiplies the coefficients by the
 summed skies, channels weighted as the core's `bright()`: /1000 for kWh/m2, x 179 / rows for mean lux. Measured on 100
 sensors (15 % of the light passes the sheet; opaque or open it would miss by -15 / +15 %): sums +0.036 % radiation,
-+0.17 % illuminance; per-sensor p95 0.085 % / 0.22 % against a reference sigma of 0.017 % (rcontrib reseeds every
-run: a new reference moves these by about that sigma). The p95 rows are informative because the CLI's resolution is
-above that noise: physical mode takes the Perez sky at the NOAA apparent sun, gendaymtx at sun.c (+0.13 % open-sky
++0.17 % illuminance; per-sensor p95 0.087 % / 0.22 % against a reference sigma of 0.018 % (rcontrib reseeds every
+run: a new reference moves these by about that sigma). The CLI's resolution is above that noise, so the p95 limit is
+a budget: physical mode takes the Perez sky at the NOAA apparent sun, gendaymtx at sun.c (+0.13 % open-sky
 illuminance through the efficacy model, -0.08 to +0.03 % radiation per sensor from the sky's shape), tau 0.5 is stored
-as 128/255 (+0.39 % of the light through the sheet), and 64 samples per patch differ from 256 by 0.06 % (p95).
-Evaluated at the NOAA sun with 1024 samples per patch (a one-off diagnostic port of the overcast Perez sky), the
-residual is 0.02 % with a spread of 0.015 %: rcontrib's noise.
+as 128/255 (+0.39 % of the light through the sheet, at most 0.16 % of a sensor's total), 64 samples per patch differ
+from 256 by 0.06 % (p95), plus 3 sigma: 0.5 %. The p95 is the row that sees tau: tau 0.47 (6 % off) moves the sums by
+only -0.92 % / -0.79 %, but the p95 to 2.2 %. Evaluated at the NOAA sun with 1024 samples per patch (a one-off
+diagnostic port of the overcast Perez sky), the residual is 0.02 % with a spread of 0.015 %: rcontrib's noise.
 
 Relative errors use `max(|lb|, 1e-3 max|lb|)` as the scale. W per direction is reconstructed from the ladybug
 SkyMatrix data (`dir + dif` per sky patch, `rho * mean` for every ground direction) over the ladybug direction order

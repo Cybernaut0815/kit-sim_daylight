@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // GPU module checks: hand-coded ground + box scene, hemisphere cull, Waechter-Binder offset, reduce / series
 // against CPU loops over the downloaded bits or transmittance bytes, adaptive sub-launches, the Radiance glass port,
-// and run() end to end with optics (slots, thin solids, residency). Self-skips without a CUDA device.
+// and run() end to end with optics (slots, thin solids, culling, residency, the dump). Self-skips without a CUDA device.
 #include "glass.h"
 #include "internal.h"
 #include <algorithm>
@@ -58,6 +58,8 @@ static void check_glass() {
   for (double a : {0., 30., 60., 89.}) { glass_TR(float(std::cos(a * kPi / 180)), 1.f, T, R); CHECK(std::fabs(T + R - 1) <= 1e-6); }   // no absorption: T + R = 1
   glass_TR(0.f, tn, T, R);
   CHECK(T == 0 && R == 1);   // grazing: everything reflected, no NaN
+  for (double Tn : {1e-4, 1e-9})   // below ~1.1e-4 the tn constants turn negative: clamped to 0, blocked, no NaN
+    for (float c : {1.f, 0.5f}) { glass_TR(c, float(tn_from_Tn(Tn)), T, R); CHECK(T >= 0 && T < 1.f / 510 && R >= 0 && R <= 1); }
 }
 // Slab test: ray from o along d against the box [lo,hi]^3 (t > 0).
 static bool hits_box(float3 o, float3 d, double lo, double hi) {
@@ -272,6 +274,18 @@ int check_gpu(const char* testsDir) {
     CHECK(gpu_reduce(*g, 2, W.data(), true, o2.data(), err) && gpu_series(*g, 2, ip2, E2.data(), err));
     for (size_t i = 0; i < 2; ++i) { CHECK(o2[i] == ob[i + 1]); for (int tt = 0; tt < T; ++tt) CHECK(E2[i * T + tt] == Ep[(i + 1) * T + tt]); }
     CHECK(!gpu_download_bits(*g, 2, bits, err));   // bytes were written, not bits
+    // 20000 copies of s1: byte-mode sub-launches start at 2^13 threads (1638 sensors x 5 words) and at most double, so
+    // at least 4 (1638 + 3276 + 6552 + 8534; bits: 4096 + 15904), each writing its slice; every byte equals s1's
+    Sensors copies;
+    copies.p.assign(20000, sp.p[1]); copies.n.assign(20000, sp.n[1]);
+    const GpuStats b0 = gpu_stats(*g);
+    std::vector<uint8_t> cb;
+    CHECK(gpu_set_scene(*g, copies, D, err) && gpu_trace(*g, 0, 20000, tf, err) && gpu_download_bytes(*g, 20000, cb, err));
+    CHECK(gpu_stats(*g).launches - b0.launches >= 4 && gpu_stats(*g).rays - b0.rays == 20000u * nDir && cb.size() == 20000u * nDir);
+    size_t badB = 0;
+    for (unsigned d = 0; d < nDir && cb.size() == 20000u * nDir; ++d) for (size_t i = 0; i < 20000; ++i) badB += cb[d * 20000 + i] != byte(1, d);
+    CHECK(badB == 0);
+    CHECK(gpu_set_scene(*g, sp, D, err));
     // transmission off: the same GAS traced without any-hit gives the bits of an all-opaque build
     std::vector<uint32_t> offBits, opaqueBits;
     CHECK(gpu_trace(*g, 0, np, gpu_ray_flags(false, false), err) && gpu_download_bits(*g, np, offBits, err));
@@ -407,24 +421,71 @@ int check_gpu(const char* testsDir) {
     const Result rOff = sun(ab, off), rPlain = sun(ab, plain);
     CHECK(rOff.values == rPlain.values && rOff.values == std::vector<double>(4, 0.0));
 
-    // glass wall south of a sensor (incidence ~71 deg): --fresnel off passes tau like porous; on passes far less
+    // glass wall south of a sensor, turned 30 deg about z (normal (-sin 30, cos 30, 0), so every term of the device's
+    // cosine counts): --fresnel off passes tau like porous; on passes glass_TR at the sun's incidence (~75 deg)
+    const double s30 = 0.5, c30 = std::sqrt(0.75);
     Mesh wall; wall.name = "wall"; wall.sensor = false;
-    wall.points = {-20, -1, 0, 20, -1, 0, 20, -1, 10, -20, -1, 10}; wall.counts = {4}; wall.indices = {0, 1, 2, 3};
+    wall.points = {-20 * c30, -1 - 20 * s30, 0, 20 * c30, -1 + 20 * s30, 0, 20 * c30, -1 + 20 * s30, 10, -20 * c30, -1 - 20 * s30, 10};
+    wall.counts = {4}; wall.indices = {0, 1, 2, 3};
     const std::vector<Mesh> gw{squares("ground", true, 0, 0.5, {0}), wall};
     Options gl = o; gl.optics = {{"wall", -1, 0, 0.64, true}};
     Options gloff = gl; gloff.fresnel = false;
     Options por = o; por.optics = {{"wall", -1, 0, 0.64, false}};
     const Result rg = sun(gw, gl), rgoff = sun(gw, gloff), rpor = sun(gw, por);
     CHECK(rgoff.values == rpor.values && rpor.values == std::vector<double>({b255(163)}));
-    CHECK(rg.values.size() == 1 && rg.values[0] > 0.25 && rg.values[0] < 0.55);
-    if (rg.values.size() == 1) std::printf("run: glass wall at ~71 deg incidence passes %.3f (tau 0.64)\n", rg.values[0]);
+    const Sun sn = sun_noaa(42.35, -71.07, -5, 6, 21, 12.0, false);   // run()'s sun for the step
+    const double cw = std::fabs(-s30 * sn.vec.x + c30 * sn.vec.y);
+    float Tw, Rw;
+    glass_TR(float(cw), float(tn_from_Tn(0.64)), Tw, Rw);
+    CHECK(rg.values.size() == 1 && std::fabs(rg.values[0] - b255(int(std::lround(255 * Tw)))) <= 1.0 / 255 + 1e-6);
+    if (rg.values.size() == 1) std::printf("run: glass wall at %.1f deg incidence passes %.3f (glass_TR %.3f, tau 0.64)\n", std::acos(cw) * 180 / kPi, rg.values[0], Tw);
 
-    // thin solids: a 20 x 20 x 0.01 m pane box (indexed, and a soup) passes tau once; the 3 m cube twice
-    std::vector<Mesh> th{squares("ground", true, 0, 0.5, {0, 100, 200}), box_mesh("pane", -10, -10, 1, 10, 10, 1.01, false),
-                         box_mesh("soup", 90, -10, 1, 110, 10, 1.01, true), box_mesh("cube", 198.5, -1.5, 1, 201.5, 1.5, 4, false)};
-    for (size_t k = 1; k < 4; ++k) th[k].sensor = false;
-    Options tho = o; tho.optics = {{"pane", -1, 0.2, 0.5, false}, {"soup", -1, 0.2, 0.5, false}, {"cube", -1, 0.2, 0.5, false}};
-    CHECK(sun(th, tho).values == std::vector<double>({b255(128), b255(128), b255(64)}));
+    // thin solids: a 20 x 20 x 0.01 m pane box (indexed, a soup, and wound inward) passes tau once; the 3 m cube twice.
+    // --cull-backfaces: every closed solid is crossed through one front face, tau once
+    Mesh flip = box_mesh("flip", 290, -10, 1, 310, 10, 1.01, false);
+    for (size_t f = 0; f < 6; ++f) std::swap(flip.indices[4 * f + 1], flip.indices[4 * f + 3]);
+    std::vector<Mesh> th{squares("ground", true, 0, 0.5, {0, 100, 200, 300}), box_mesh("pane", -10, -10, 1, 10, 10, 1.01, false),
+                         box_mesh("soup", 90, -10, 1, 110, 10, 1.01, true), box_mesh("cube", 198.5, -1.5, 1, 201.5, 1.5, 4, false), flip};
+    for (size_t k = 1; k < th.size(); ++k) th[k].sensor = false;
+    Options tho = o;
+    tho.optics = {{"pane", -1, 0.2, 0.5, false}, {"soup", -1, 0.2, 0.5, false}, {"cube", -1, 0.2, 0.5, false}, {"flip", -1, 0.2, 0.5, false}};
+    const std::vector<double> thinV{b255(128), b255(128), b255(64), b255(128)}, culledV(4, b255(128));
+    CHECK(sun(th, tho).values == thinV);
+    Options thc = tho; thc.cullBackfaces = true;
+    CHECK(sun(th, thc).values == culledV);
+    // a resident scene keeps its thin solids: reused as built, with culling, after a tau edit
+    Options thk = tho; thk.sceneKey = "thin";
+    r = sun(th, thk); CHECK(!r.sceneReused && r.values == thinV);
+    r = sun(th, thk); CHECK(r.sceneReused && r.values == thinV);
+    thk.cullBackfaces = true; r = sun(th, thk); CHECK(r.sceneReused && r.values == culledV);
+    thk.cullBackfaces = false; thk.optics[0].tau = 0.25; r = sun(th, thk);
+    CHECK(r.sceneReused && r.values == std::vector<double>({b255(64), b255(128), b255(64), b255(128)}));
+
+    // --dump-bits with a transmitting slot: uint8 rows [sensors x directions], here three sun steps of the two-mesh case;
+    // a transmitting slot without faces in the GAS (the sensor mesh under --no-self-occlude) keeps the uint32 bits
+    const auto npy = [](const std::string& path, std::string& head, std::vector<uint8_t>& data) {
+      std::FILE* f = std::fopen(path.c_str(), "rb");
+      if (!f) return false;
+      std::vector<uint8_t> b;
+      for (int ch; (ch = std::fgetc(f)) != EOF;) b.push_back(uint8_t(ch));
+      std::fclose(f);
+      const size_t n = b.size() < 10 ? 0 : 10 + size_t(b[8] | (b[9] << 8));   // magic, version, header length, header
+      if (n == 0 || b.size() < n) return false;
+      head.assign(b.begin() + 10, b.begin() + std::ptrdiff_t(n)); data.assign(b.begin() + std::ptrdiff_t(n), b.end());
+      return true;
+    };
+    Options od = o; od.t1 = od.t0 + 3; od.dumpBitsPath = std::string(testsDir) + "/_check_gpu_tmp.npy";
+    std::string head;
+    std::vector<uint8_t> data;
+    r = sun(ab, od);
+    CHECK(r.values == std::vector<double>({3, 3 * b255(128), 3 * b255(64), 0}));
+    CHECK(npy(od.dumpBitsPath, head, data) && head.find("'descr': '<u1'") != std::string::npos && head.find("'shape': (4, 3)") != std::string::npos);
+    CHECK(data == std::vector<uint8_t>({255, 255, 255, 128, 128, 128, 64, 64, 64, 0, 0, 0}));
+    Options ou = od; ou.selfOcclude = false; ou.optics = {{"ground", -1, 0.2, 0.5, false}};
+    r = sun(ab, ou);
+    CHECK(r.values == std::vector<double>(4, 0.0));
+    CHECK(npy(ou.dumpBitsPath, head, data) && head.find("'descr': '<u4'") != std::string::npos && head.find("'shape': (4, 1)") != std::string::npos);
+    std::remove(od.dumpBitsPath.c_str());
 
     // residency: a tau edit on the same key reuses the scene; a slot that starts to transmit rebuilds; no key never reuses
     const std::vector<Mesh> lid{squares("ground", true, 0, 0.5, {0}), squares("lid", false, 1, 20, {0})};

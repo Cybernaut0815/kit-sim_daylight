@@ -35,7 +35,7 @@ LADYBUG = ['--mode', 'ladybug', '--no-self-occlude', '--offset', '0']
 TOL = {'sky_ascii_rows': 0, 'sun_noaa_deg': 1e-6, 'sun_flips': 0, 'sun_radiance_deg': 1e-4, 'sun_pvlib_deg': 0.02,
        'bits_mismatch': 1e-3, 'bits_edge_m': 1e-4, 'e2e_rel': 1e-3, 'e2e_residual_rel': 1e-3, 'sunhours_edge_h': 1.0,
        'analytic_flat': 0.01, 'analytic_direct': 1e-3, 'analytic_north': 1e-6, 'usd_rel': 1e-5,
-       'clearsky_rel': 5e-3, 'clearsky_sum_rel': 3e-3, 'transmit_bias': 0.01}
+       'clearsky_rel': 5e-3, 'clearsky_sum_rel': 3e-3, 'transmit_bias': 0.01, 'transmit_p95': 5e-3}
 RGB_W = np.array([0.265074126, 0.670114631, 0.064811243])     # src/run.cpp bright(): Radiance CIE_rf / gf / bf
 ROWS, FAILS = [], []
 
@@ -435,9 +435,11 @@ def layer_transmit(exe, epws, scenes):
         sigma = np.sqrt(np.mean((r8 / ref - 1) ** 2) / 5)
         rel = np.abs(ours[:, col] / ref - 1)
         report('8 transmit', f'canopy nodni {q}', '|sum ours / sum rcontrib - 1|', abs(ours[:, col].sum() / ref.sum() - 1), TOL['transmit_bias'])
-        # ponytail: informative: ours' resolution (sky at the NOAA apparent sun, u8 transmittance, 64 samples per patch)
-        # is above the reference noise (validate/README.md); a hard per-sensor limit needs a budget for those terms
-        report('8 transmit', f'canopy nodni {q}', 'per-sensor p95 |ours / ref - 1| (limit 3 sigma)', np.percentile(rel, 95), 3 * sigma, hard=False)
+        # The sums see tau only through the 15 % of the light that passes the sheet (tau 6 % off moves them 0.9 %); the
+        # p95 catches it (2.2 %). Budget 0.5 %, ours' resolution above the reference noise (validate/README.md): sky at
+        # the NOAA apparent sun 0.08 % (+0.13 % illuminance), tau as 128/255 <= 0.16 %, 64 vs 256 samples 0.06 %, 3 sigma
+        report('8 transmit', f'canopy nodni {q}', 'per-sensor p95 |ours / ref - 1|', np.percentile(rel, 95), TOL['transmit_p95'])
+        report('8 transmit', f'canopy nodni {q}', 'reference per-sensor 3 sigma (-ad 8192 vs 32768)', 3 * sigma, TOL['transmit_p95'], hard=False)
 
 
 LAYERS = {'sky': layer_sky, 'sun': layer_sun, 'bits': layer_bits, 'e2e': layer_e2e, 'usd': layer_usd, 'analytic': layer_analytic,

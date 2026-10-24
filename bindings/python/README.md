@@ -80,7 +80,7 @@ with `_2`, `_3` ... (`/World/Bldg/roof` -> `World_Bldg_roof.dmesh`); `meshes.jso
 
 ```
 offset  0  char[4]   "DLM1"                 magic + version
-offset  4  uint32    0                      reserved (keeps the arrays 8-byte aligned)
+offset  4  uint32    flags                  0 here (this binding writes no slot block); bit 0 = uint16 slot[n_faces] after the indices, see docs/input.md
 offset  8  uint64    n_points
 offset 16  uint64    n_faces
 offset 24  uint64    n_indices

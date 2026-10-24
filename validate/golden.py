@@ -65,6 +65,8 @@ CASES = {**{f'{s}_phys': (s, f, PHYS + (DUMPS if s == 'box' else [])) for s, f i
 VARIANTS = [('box_dmesh_slots', 'box_dmesh', 'slots', [], []),
             ('box_dmesh_optics_opaque', 'box_dmesh', 'slots', ['--optics', '*=0.2;flat/1=0.3;box_a=0.25;box_b/2=0.1'],
              ['--optics']),
+            ('box_dmesh_optics_opaque_transmission_on', 'box_dmesh', 'slots',
+             ['--optics', '*=0.2;flat/1=0.3;box_a=0.25;box_b/2=0.1', '--transmission', 'on'], ['--optics', '--transmission']),
             ('box_dmesh_optics_transmission_off', 'box_dmesh', 'slots',
              ['--optics', 'box_a/1=0.1,0.5,porous;box_b=0,0.64,glass;flat/2=0.3,0.2', '--transmission', 'off'],
              ['--optics', '--transmission']),

@@ -33,7 +33,7 @@ struct Scene {
   double c[3] = {0, 0, 0};   // bbox centre the scene's triangles were recentred by
   size_t nTris = 0;
   int skipped = 0;
-  std::vector<unsigned> thin;   // per global slot: thin_solid() of the transmitting slots, from the build
+  std::vector<unsigned> thin;   // per global slot: thin_solid() of the transmitting slots, from the build (empty: none)
   GasSlot gas;               // parked scenes only
 };
 struct Resident {
@@ -103,11 +103,19 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
 
   // ---- geometry ------------------------------------------------------------------------------------------------
   // Optics per global slot. --transmission off: every slot opaque (bits, no any-hit); --fresnel off: glass passes tau.
+  // Only a slot with faces in the GAS transmits (not a sensor mesh's under --no-self-occlude, nor an id no face uses).
   std::vector<Slot> slots;
   if (!resolve_optics(meshes, opt.optics, slots, err)) return false;
+  std::vector<char> inGas(opt.transmission ? slots.size() : 0, 0);
+  for (size_t k = 0, b = 0; opt.transmission && k < meshes.size(); b += slot_count(meshes[k++])) {
+    const Mesh& m = meshes[k];
+    if (m.sensor && !opt.selfOcclude) continue;
+    if (m.slot.empty()) inGas[b] = !m.counts.empty();
+    else for (uint16_t s : m.slot) inGas[b + s] = 1;
+  }
   std::string lit;   // the transmitting slots: built into the GAS (geometry flags, thin solids), so part of its identity
   for (size_t s = 0; s < slots.size(); ++s) {
-    if (!opt.transmission) slots[s].tau = 0;
+    if (!opt.transmission || !inGas[s]) slots[s].tau = 0;
     if (!opt.fresnel) slots[s].flags &= ~kSlotGlass;
     if (slots[s].tau > 0) lit += (lit.empty() ? "" : ",") + std::to_string(s);
   }
@@ -125,7 +133,7 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   if (reuse) { const Scene& s = installed ? R.cur : *parkedAt(); std::copy(s.c, s.c + 3, c); skipped = s.skipped; thin = s.thin; }
   else {
     bbox_centre(meshes, c);
-    thin.assign(slots.size(), 0);
+    if (translucent) thin.assign(slots.size(), 0);
     size_t base = 0;
     for (const Mesh& m : meshes) {
       const size_t ns = slot_count(m);
@@ -138,7 +146,9 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
       base += ns;
     }
   }
-  for (size_t s = 0; s < slots.size() && s < thin.size(); ++s) slots[s].flags |= thin[s];
+  // A thin solid's exit face passes everything. With --cull-backfaces a closed solid is crossed through one front face
+  // anyway (the other is culled): tau once without the rule, whichever way it is wound.
+  for (size_t s = 0; !opt.cullBackfaces && s < slots.size() && s < thin.size(); ++s) slots[s].flags |= thin[s];
   Sensors sens;
   std::string warn;
   out.ranges.clear();
@@ -386,7 +396,8 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
         R.parked.pop_back();
       }
     }
-    if (!gpu_set_scene(*g, sens, D, err) || !gpu_set_slots(*g, slots, err)) return false;
+    const std::vector<Slot> opaque(1);   // a GAS without transmitting slots has one record (ids may run to 65535 per mesh)
+    if (!gpu_set_scene(*g, sens, D, err) || !gpu_set_slots(*g, translucent ? slots : opaque, err)) return false;
     // ponytail: 256 MiB cap on each per-chunk buffer, visibility (bits, or transmittance bytes) and the series tile; make
     // it a device-memory fraction if it ever thrashes
     const size_t perSensor = std::max(translucent ? nDir : 4 * nWords, series ? 4 * size_t(Tup) : size_t(0));

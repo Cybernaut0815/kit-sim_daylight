@@ -314,8 +314,16 @@ bool gpu_trace(Gpu& g, size_t i0, size_t nc, unsigned rayFlags, std::string& err
   if (!grow(&g.dVis, &g.visCap, g.bytes ? g.nDir * nc : g.nWords * nc * sizeof(unsigned), err)) return false;
   g.i0 = i0;
   if (nc == 0 || g.nWords == 0) return true;
-  const double targetMs = 150;   // per sub-launch, well under the 2 s Windows TDR
-  size_t done = 0, n = std::min<size_t>(4096, nc);
+  // Each sub-launch is sized from the previous one's time, well under the 2 s Windows TDR: ~150 ms, first 4096 sensors,
+  // at least 1024. With any-hit a ray can cost thousands of opaque ones (a call per crossing, no early exit near tau 1):
+  // byte mode starts at 2^13 threads (2^18 rays, about a full GPU: a thread traces its 32 directions in turn, so a
+  // smaller launch is hardly shorter), never goes below that, aims at 30 ms and at most doubles.
+  // ponytail: the --bench boxes all at tau 1 take 0.29 s per 2^13 threads on the 2060, and sensors > ~60x costlier than
+  // the previous launch's can pass the TDR; split a thread's directions over launches if that shows up
+  const bool any = g.bytes;
+  const double targetMs = any ? 30 : 150;
+  const size_t nMin = any ? std::max<size_t>(1, (size_t(1) << 13) / g.nWords) : 1024;
+  size_t done = 0, n = std::min(any ? nMin : 4096, nc);
   while (done < nc) {
     // params.nc is the row stride of the whole chunk; the sub-launch writes its slice bits[w*nc + done + i] / bytes[d*nc + done + i].
     unsigned* bits = g.bytes ? nullptr : static_cast<unsigned*>(g.dVis) + done;
@@ -329,7 +337,7 @@ bool gpu_trace(Gpu& g, size_t i0, size_t nc, unsigned rayFlags, std::string& err
     g.stats.traceMs += ms; g.stats.rays += n * g.nDir; g.stats.launches++;
     done += n;
     const double want = double(n) * targetMs / std::max<double>(ms, 1e-3);
-    n = std::min(std::max<size_t>(want > 1e12 ? size_t(1) << 40 : size_t(want), 1024), nc - done);
+    n = std::min({std::max<size_t>(want > 1e12 ? size_t(1) << 40 : size_t(want), nMin), any ? 2 * n : nc, nc - done});
   }
   return true;
 }

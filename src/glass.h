@@ -6,9 +6,10 @@
 #include <vector_types.h>   // __host__ __device__ for host compilers too (crt/host_defines.h)
 
 // Transmissivity tn from the transmittance at normal incidence Tn (m_glass.c header comment; n = 1.52). Double: the
-// difference of near-equal terms loses ~5 digits in float.
+// difference of near-equal terms loses ~5 digits in float. At least 0: below Tn ~1.1e-4 the 10-digit constants turn it
+// negative, and powf below would give NaN (such a pane passes less than 1/510 at any angle: blocked).
 __host__ __device__ inline double tn_from_Tn(double Tn) {
-  return (sqrt(.8402528435 + .0072522239 * Tn * Tn) - .9166530661) / .0036261119 / Tn;
+  return fmax(0., (sqrt(.8402528435 + .0072522239 * Tn * Tn) - .9166530661) / .0036261119 / Tn);
 }
 
 // Transmittance T and reflectance R of the pane at incidence cosine c (0..1) for transmissivity tn (< 1). m_glass.c with

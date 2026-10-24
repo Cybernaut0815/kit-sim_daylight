@@ -139,6 +139,8 @@ bool resolve_optics(const std::vector<Mesh>& meshes, const std::vector<Optics>& 
   if (auto d = std::adjacent_find(keys.begin(), keys.end()); d != keys.end()) {
     err = "--optics " + d->first + (d->second >= 0 ? "/" + std::to_string(d->second) : "") + " given twice"; return false;
   }
+  // ponytail: one Slot (16 B, host) per id up to each mesh's largest, so sparse high ids (65535) cost ~1 MB per mesh;
+  // a sparse table if such meshes appear (only a transmitting run uploads a record per slot)
   out.assign(base.back(), Slot{});
   for (int rank = 0; rank < 3; ++rank)   // * < NAME < NAME/SLOT: later ranks overwrite
     for (const Optics& o : rows) {
