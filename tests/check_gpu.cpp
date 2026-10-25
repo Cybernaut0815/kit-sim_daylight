@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 AND LicenseRef-Commons-Clause-1.0
 // GPU module checks: hand-coded ground + box scene, hemisphere cull, Waechter-Binder offset, reduce / series
 // against CPU loops over the downloaded bits or transmittance bytes, adaptive sub-launches, the Radiance glass port,
-// the reflected-light pass against closed forms (bins, events, chunks), and run() end to end with optics (slots, thin
-// solids, culling, residency, the dump) and bounces. Self-skips without a CUDA device.
+// sensors in the plane of km-sized triangles, the reflected-light pass against closed forms (bins, events, chunks), and
+// run() end to end with optics (slots, thin solids, culling, residency, the dump), bounces and own planes. Self-skips
+// without a CUDA device.
 #include "glass.h"
 #include "internal.h"
 #include <algorithm>
@@ -321,6 +322,95 @@ int check_gpu(const char* testsDir) {
     glass.flags = 0;
     CHECK(gpu_set_slots(*g, {glass}, err) && gpu_trace(*g, 0, 1, gpu_ray_flags(false, true), err) && gpu_download_bytes(*g, 1, gb, err));
     CHECK(gb == std::vector<uint8_t>(5, 163));   // 0.64 x 255 = 163.2 at every angle
+  }
+
+  // sensors in the plane of a 1, 2 or 10 km quad (2 triangles) at the origin, near it and far out, looking up and down,
+  // and on a 2 or 10 km wall: the hardware's float error (~2^-25 x the quad) would put the quad on up to a third of their
+  // rays; every direction of their hemisphere is open (768 per side, down to 0.25 deg), and in byte mode they see a porous
+  // pane 50 m up as they see it alone. Still blocked: everything below a sensor looking down 1 cm over the quad (4x the
+  // 2^-22 tolerance away even at 10 km), and what a 1 cm curb 0.2 m away blocks alone, in both modes (hits under 1/32 m:
+  // the closest-hit walk)
+  {
+    std::vector<float3> Dq;
+    for (double alt : {0.25, 0.5, 1., 2., 4., 8., 15., 30., 45., 60., 75., 89.})
+      for (int j = 0; j < 64; ++j) {
+        const double a = alt * kPi / 180, az = 2 * kPi * (j + 0.5) / 64;
+        Dq.push_back(f3(std::cos(a) * std::sin(az), std::cos(a) * std::cos(az), std::sin(a)));
+      }
+    for (size_t d = 0, up = Dq.size(); d < up; ++d) Dq.push_back(f3(Dq[d].x, Dq[d].y, -Dq[d].z));
+    const size_t nq = Dq.size(), wq = (nq + 31) / 32;
+    const auto vis = [&](const Tris& tr, const std::vector<Slot>& sl, const Sensors& se, bool bytes, std::vector<uint8_t>& v) {
+      std::vector<uint32_t> b;
+      std::vector<uint8_t> by;
+      const size_t n = se.p.size();
+      const bool ok = gpu_build(*g, tr, sl, err) && gpu_set_slots(*g, sl, err) && gpu_set_scene(*g, se, Dq, err) &&
+                      gpu_trace(*g, 0, n, gpu_ray_flags(false, bytes), err) && (bytes ? gpu_download_bytes(*g, n, by, err) : gpu_download_bits(*g, n, b, err));
+      CHECK(ok);
+      v.assign(n * nq, 0);   // [sensor x direction]: 1 (bits) or the byte
+      for (size_t i = 0; ok && i < n; ++i)
+        for (size_t d = 0; d < nq; ++d) v[i * nq + d] = bytes ? by[d * n + i] : uint8_t((b[(d / 32) * n + i] >> (d % 32)) & 1u);
+      return ok;
+    };
+    CHECK(wq == 48);
+    std::vector<uint8_t> v, alone;
+    std::vector<Slot> porous(2);   // slot 1 tau 0.5
+    porous[1].tau = 0.5f;
+    for (double L : {1000., 2000., 10000.}) {
+      const double h = L / 2;
+      Tris tq, tw;
+      quad(tq, f3(-h, -h, 0), f3(h, -h, 0), f3(h, h, 0), f3(-h, h, 0));
+      quad(tw, f3(-h, 0, -h), f3(h, 0, -h), f3(h, 0, h), f3(-h, 0, h));   // a wall in y = 0
+      Sensors so, sw;
+      for (float3 p : {f3(0, 0, 0), f3(0.37, -0.21, 0), f3(0.3 * h, -0.4 * h, 0)})
+        for (float nz : {1.f, -1.f}) { so.p.push_back(p); so.n.push_back(f3(0, 0, nz)); }
+      for (float3 p : {f3(0, 0, 0), f3(0.3 * h, 0, -0.2 * h)})
+        for (float ny : {1.f, -1.f}) { sw.p.push_back(p); sw.n.push_back(f3(0, ny, 0)); }
+      so.p.push_back(f3(0.1, 0.1, 0.01)); so.n.push_back(f3(0, 0, -1));   // looking down 1 cm over the quad
+      for (int wall = 0; wall < 2; ++wall) {
+        if (wall && L == 1000) continue;
+        const Sensors& se = wall ? sw : so;
+        if (!vis(wall ? tw : tq, {Slot{}}, se, false, v)) continue;
+        size_t wrong = 0, open = 0;
+        for (size_t i = 0; i < se.p.size(); ++i)
+          for (size_t d = 0; d < nq; ++d) {
+            const uint8_t expect = dotf(se.n[i], Dq[d]) > 0 && !(!wall && i == 6);
+            wrong += v[i * nq + d] != expect; open += expect;
+          }
+        CHECK(wrong == 0 && open == (wall ? 4 : 6) * nq / 2);
+        if (wrong) std::printf("gpu: %s of %.0f m: %zu of %zu sensor directions wrong\n", wall ? "wall" : "quad", L, wrong, se.p.size() * nq);
+      }
+      // byte mode: the quad (opaque) and a porous pane (slot 1, tau 0.5) 50 m up over x 0..200, y -100..100, vs the pane alone
+      Tris tp, pane;
+      for (Tris* tr : {&tp, &pane}) quad(*tr, f3(0, -100, 50), f3(200, -100, 50), f3(200, 100, 50), f3(0, 100, 50), 1);
+      quad(tp, f3(-h, -h, 0), f3(h, -h, 0), f3(h, h, 0), f3(-h, h, 0), 0);
+      Sensors sp = so;
+      sp.p.pop_back(); sp.n.pop_back();
+      if (vis(tp, porous, sp, true, v) && vis(pane, porous, sp, true, alone)) {
+        size_t crossed = 0;
+        for (uint8_t b : alone) crossed += b == 128;
+        CHECK(v == alone && crossed > 100);
+      }
+    }
+    // a 1 cm curb 0.2 to 0.3 m east of the sensor at the origin of the 10 km quad: rays east up to ~2.9 deg high meet it;
+    // in byte mode under the pane (seen from 12.6 deg up), the curb's directions are its zero bytes
+    Tris curb, both;
+    quad(curb, f3(0.2, -1, 0), f3(0.2, 1, 0), f3(0.2, 1, 0.01), f3(0.2, -1, 0.01));   // west face
+    quad(curb, f3(0.2, -1, 0.01), f3(0.2, 1, 0.01), f3(0.3, 1, 0.01), f3(0.3, -1, 0.01));   // top
+    both = curb;
+    quad(both, f3(-5000, -5000, 0), f3(5000, -5000, 0), f3(5000, 5000, 0), f3(-5000, 5000, 0));
+    Sensors sc; sc.p = {f3(0, 0, 0)}; sc.n = {f3(0, 0, 1)};
+    size_t blocked = 0;
+    if (vis(both, {Slot{}}, sc, false, v) && vis(curb, {Slot{}}, sc, false, alone)) {
+      for (size_t d = 0; d < nq / 2; ++d) blocked += !alone[d];
+      CHECK(v == alone && blocked >= 64);   // alt 0.25 to 2 deg, azimuths up to ~80 deg either side of east
+    }
+    for (Tris* tr : {&curb, &both}) quad(*tr, f3(0, -100, 50), f3(200, -100, 50), f3(200, 100, 50), f3(0, 100, 50), 1);
+    if (vis(both, porous, sc, true, v) && vis(curb, porous, sc, true, alone)) {
+      size_t zero = 0, crossed = 0;
+      for (size_t d = 0; d < nq / 2; ++d) { zero += !alone[d]; crossed += alone[d] == 128; }
+      CHECK(v == alone && zero == blocked && crossed > 100);
+    }
+    std::printf("gpu: own planes of 1-10 km quads pass; a 1 cm curb blocks %zu directions with and without the 10 km quad\n", blocked);
   }
 
   // reflected light (gpu_bounce): a sensor's row holds its coefficient per bin (0 ground, 1 + p the patches of the sky
@@ -807,6 +897,37 @@ int check_gpu(const char* testsDir) {
     if (rm.values.size() == 1 && rv.values.size() == 1) {
       CHECK(std::fabs(rm.values[0] / (mR * rv.values[0]) - 1) <= 2e-3);
       std::printf("run: opaque glass mirrors %.5f of the virtual ground (<R> %.5f)\n", rm.values[0] / rv.values[0], mR);
+    }
+  }
+
+  // run() end to end, June, clear sky: a 2 km ground (one face, a sensor mesh: blocking) with 1 m squares lying in it near
+  // the origin and far out, and a 2 km wall with squares flush on it, get the radiation and sun hours they get when sensor
+  // meshes do not block (--no-self-occlude); float error on their own planes would cost them up to a quarter
+  {
+    std::string e;
+    Weather cs;
+    CHECK(clear_sky_weather(42.35, -71.07, -5, 3, 0, cs, e));
+    Options o;
+    o.quantities = {Quantity::Radiation, Quantity::SunHours};
+    CHECK(parse_hoy("06-01T00:00", false, o.t0, e) && parse_hoy("07-01T00:00", false, o.t1, e));
+    Mesh wall, flush;
+    wall.name = "wall"; flush.name = "flush";
+    wall.points = {-1000, 0, 0, 1000, 0, 0, 1000, 0, 2000, -1000, 0, 2000};   // facing -y
+    wall.counts = {4}; wall.indices = {0, 1, 2, 3};
+    const double xz[4][2] = {{0.3, 1000.2}, {7, 1003}, {300, 400}, {-900, 1900}};   // the bbox centre is (0, 0, 1000)
+    for (const auto& q : xz) {
+      const double x = q[0], z = q[1];
+      const int b = int(flush.numPoints());
+      flush.points.insert(flush.points.end(), {x - 0.5, 0, z - 0.5, x + 0.5, 0, z - 0.5, x + 0.5, 0, z + 0.5, x - 0.5, 0, z + 0.5});
+      flush.counts.push_back(4); flush.indices.insert(flush.indices.end(), {b, b + 1, b + 2, b + 3});
+    }
+    for (const std::vector<Mesh>& scene : {std::vector<Mesh>{squares("ground", true, 0, 1000, {0}), squares("spots", true, 0, 0.5, {0.3, 7, 300, -950})},
+                                           std::vector<Mesh>{wall, flush}}) {
+      Result own, open;
+      Options no = o; no.selfOcclude = false;
+      CHECK(run(scene, &cs, o, own, e) && run(scene, &cs, no, open, e));
+      CHECK(own.values.size() == 10 && own.values == open.values);
+      if (own.values.size() == 10) std::printf("run: %s and the squares in it, as unblocked: %.3f kWh/m2, %.0f h\n", scene[0].name.c_str(), own.values[2], own.values[3]);
     }
   }
   return failures;

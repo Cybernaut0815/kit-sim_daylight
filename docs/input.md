@@ -38,8 +38,10 @@ same hours of every day) select instants, the default is annual.
   (`Result::ranges`) map rows back to meshes.
 - **Sensor meshes block by default.** A sensor mesh is also an occluder (self-shading, like the analysed geometry in
   a Radiance scene); `--no-self-occlude` leaves sensor meshes out of the acceleration structure. An element never
-  blocks its own rays: the ray origin is nudged along the normal (Waechter-Binder) and hits closer than 1e-5 m are
-  ignored.
+  blocks its own rays: the ray origin is nudged along the normal (Waechter-Binder), hits closer than 1e-5 m are
+  ignored, and a ray goes on past a triangle whose plane holds the sensor, within 2^-22 x the triangle's extent (0.5 mm
+  at 2 km; a sensor that close counts as lying in it, whichever way it faces). Only the GPU's float error puts such a
+  plane on the sensor's rays, on a km-sized ground quad or wall up to a third of them.
 - **Hemisphere cull.** Per sensor, directions with a non-positive cosine against its normal are never traced and
   contribute nothing. No sensor is dropped; every element gets a row, even one looking into a wall (then 0).
 - **`--cull-backfaces`.** Occluder triangles whose front side faces away from the ray are ignored, decided per ray

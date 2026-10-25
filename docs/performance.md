@@ -46,9 +46,16 @@ transmitting slot does: ~20 % more GAS memory, a few % slower visibility) under 
 server that switches bounces on and off for such a model rebuilds it each time or parks both. At sky density 4 the
 rows (2306 bins, 9 kB per sensor) cut chunks to 29 k sensors (35 chunks instead of 3), which costs the city-like scene
 nothing but slowed both passes of `--bench` (launch tails, there and in the visibility's smaller launches). Without
-`--bounces` the pass does not run and the visibility keeps its kernel (byte mode has its own raygen, the default bits
-one is the original): `--bench` best of 3 against the build before reflected light, interleaved, 1.37 vs 1.36 GRays/s
-(both throttled at 88 C).
+`--bounces` the pass does not run and the visibility keeps its kernel (byte mode has its own raygen): `--bench` best of
+3 against the build before reflected light, interleaved, 1.37 vs 1.36 GRays/s (both throttled at 88 C).
+
+Own planes (a sensor in the plane of a large triangle, [input.md](input.md)): a visibility hit under 1/32 m above the
+sensor's plane is traced again by closest hits, so only such sensors pay, two or three traversals more per direction
+that meets their plane; any other hit costs one comparison. Against the build before, interleaved A-B-B-A, best of 6
+(trace ms): `--bench` 2190 vs 2206, with 10 k boxes 1442 vs 1447, with one box 760 vs 825, byte mode (10 k boxes, one
+porous slot) 1735 vs 1780, `--bounces 1` visibility 1432 vs 1460 and reflected light 1892 vs 1884. Keeping one more
+value live across the visibility traversals (a mask of such hits to trace after the word, or the ray direction) had
+cost 1-2 %.
 
 Noise (canyon fixture, 400 facade sensors with a ground mesh, one bounce, against M = 65536): at M 1024 the annual
 radiation is within 0.5 % (median sensor) and 2.3 % (95th percentile) of the reference, the reflected part itself
