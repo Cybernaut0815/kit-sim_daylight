@@ -34,7 +34,7 @@ const char* const kUsage =
     "  --optics SPEC[;SPEC...]  NAME[/SLOT]=RHO[,TAU[,glass|porous]] per mesh / face slot, * = every mesh (repeatable;\n"
     "                           default rho 0.2, tau 0)\n"
     "  --transmission off|on    light through glass / porous slots (default off: every surface opaque)\n"
-    "  --fresnel on|off         glass transmittance by angle (default on; off: tau at every angle)\n"
+    "  --fresnel on|off         glass by angle (default on; off: tau at every angle, no glass mirror in --bounces)\n"
     "  --bounces N              reflected light: up to N = 1..20 diffuse reflections by RHO (physical; default 0: none)\n"
     "  --bounce-samples M       paths per sensor for --bounces, 64..65536 (default 1024; noise falls as 1 / sqrt(M))\n"
     "  --out FILE[.npy]         values (text rows, or float64 [N x C] NumPy when .npy) + FILE.json manifest\n"

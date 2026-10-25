@@ -108,7 +108,8 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   out.durationHours = durationHours;
 
   // ---- geometry ------------------------------------------------------------------------------------------------
-  // Optics per global slot. --transmission off: every slot opaque (bits, no any-hit); --fresnel off: glass passes tau.
+  // Optics per global slot. --transmission off: every slot opaque (bits, no any-hit); --fresnel off: glass passes tau
+  // and never mirrors, with or without transmission (the glass flag is dropped).
   // Only a slot with faces in the GAS transmits (not a sensor mesh's under --no-self-occlude, nor an id no face uses),
   // and only those slots' rho and glass matter to the bounce pass (glass mirrors with --transmission off too).
   std::vector<Slot> slots;
