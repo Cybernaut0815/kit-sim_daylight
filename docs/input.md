@@ -39,9 +39,12 @@ same hours of every day) select instants, the default is annual.
 - **Sensor meshes block by default.** A sensor mesh is also an occluder (self-shading, like the analysed geometry in
   a Radiance scene); `--no-self-occlude` leaves sensor meshes out of the acceleration structure. An element never
   blocks its own rays: the ray origin is nudged along the normal (Waechter-Binder), hits closer than 1e-5 m are
-  ignored, and a ray goes on past a triangle whose plane holds the sensor, within 2^-22 x the triangle's extent (0.5 mm
-  at 2 km; a sensor that close counts as lying in it, whichever way it faces). Only the GPU's float error puts such a
-  plane on the sensor's rays, on a km-sized ground quad or wall up to a third of them.
+  ignored, and a ray that leaves the plane of a triangle holding the sensor (within 2^-22 x the triangle's extent,
+  0.5 mm at 2 km) on the side the sensor faces goes on past that triangle: only the GPU's float error puts it on such
+  rays, on a km-sized ground quad or wall up to a third of them. A ray into the plane (from a tilted sensor, e.g. a
+  vertex normal where a facade meets the ground) is blocked by it; only near the recentred origin, where the nudge is
+  2^-16 m, can a km-sized triangle's float error still let a few such rays through (a 45 deg vertex sensor at a
+  facade's foot on a 2 km ground: up to 15 of its directions below the horizon, +0.7 % radiation).
 - **Hemisphere cull.** Per sensor, directions with a non-positive cosine against its normal are never traced and
   contribute nothing. No sensor is dropped; every element gets a row, even one looking into a wall (then 0).
 - **`--cull-backfaces`.** Occluder triangles whose front side faces away from the ray are ignored, decided per ray

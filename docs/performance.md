@@ -50,12 +50,22 @@ nothing but slowed both passes of `--bench` (launch tails, there and in the visi
 3 against the build before reflected light, interleaved, 1.37 vs 1.36 GRays/s (both throttled at 88 C).
 
 Own planes (a sensor in the plane of a large triangle, [input.md](input.md)): a visibility hit under 1/32 m above the
-sensor's plane is traced again by closest hits, so only such sensors pay, two or three traversals more per direction
-that meets their plane; any other hit costs one comparison. Against the build before, interleaved A-B-B-A, best of 6
-(trace ms): `--bench` 2190 vs 2206, with 10 k boxes 1442 vs 1447, with one box 760 vs 825, byte mode (10 k boxes, one
-porous slot) 1735 vs 1780, `--bounces 1` visibility 1432 vs 1460 and reflected light 1892 vs 1884. Keeping one more
-value live across the visibility traversals (a mask of such hits to trace after the word, or the ray direction) had
-cost 1-2 %.
+sensor's plane has its triangle fetched (any other hit costs one comparison), and only a hit on an own plane has the
+ray walked again by closest hits, two or three traversals more; a warp waits for every lane that walks. Measured with
+the GPU thermally capped at 960 MHz (84-90 C, times about twice the table's), Boston annual, radiation + sun hours,
+best of 4, trace ms, this build against the build before the rule: 100 k sensors (a 1 m grid, self-occluding) lying in
+a 2 km ground quad at the recentred origin 381 vs 169, with 1000 boxes on the quad 439 vs 213, in byte mode with the
+boxes porous 1887 vs 770; with the quad 5 cm lower both builds take 131-138 / 215-235 / 822-827 and this build gives the
+sensors in the plane exactly those values (the build before was cheaper there only because false hits cost the
+sensors 1-23 % of their radiation, 0.3-36 % in byte mode); a 0.1 m grid between 3 cm curbs, every curb hit under
+1/32 m and none an own plane, 338 vs 275, with 30 cm curbs 272 vs 299, the values identical. The first version of the
+rule walked after every such hit without the fetch: 336 / 394 / 1665 in the plane, 508 between the 3 cm curbs.
+`--bench` never takes the path: its boxes start 0.1 m above the grid, and recentring puts the grid 30 m below the
+bounding box's centre, where offset_ray's 256 ulps (5e-4 m) are far above its 1 m cells' error. So its A/B, the same
+GPU state, interleaved A-B-B-A, best of 6, this build vs the build before the rule, measures code generation only:
+`--bench` 4248 vs 4240, 10 k boxes 2659 vs 2644, one box 1340 vs 1478, byte mode (10 k boxes, one porous slot) 3202 vs
+3229; `--bounces 1` (10 k boxes) against the first version of the rule, 8 runs each, medians: visibility 2681 vs 2676,
+reflected light 3414 vs 3390 (+0.7 %, inside both builds' 3.32-3.49 s spread).
 
 Noise (canyon fixture, 400 facade sensors with a ground mesh, one bounce, against M = 65536): at M 1024 the annual
 radiation is within 0.5 % (median sensor) and 2.3 % (95th percentile) of the reference, the reflected part itself

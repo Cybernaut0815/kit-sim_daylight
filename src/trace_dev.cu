@@ -48,24 +48,30 @@ static __forceinline__ __device__ bool hit_triangle(Hit& h) {
   h.lift = (h.ext * 9.5367432e-7f) * h.n;
   return true;
 }
-// The hit's plane lies within 2^-22 x its triangle's extent of the ray origin (8x the hardware's error): from a sensor,
-// its own plane (a large occluder's, near the origin), which its rays meet only through that error. Such hits pass, as
-// tmin means them to.
-static __forceinline__ __device__ bool own_plane(const Hit& h, float3 d) {
-  return optixHitObjectGetRayTmax() * fabsf(dot(d, h.n)) < h.ext * 2.3841858e-7f;
+// The hit's plane lies within 2^-22 x its triangle's extent of the ray origin (8x the hardware's error), and the ray
+// goes on into the side of it the sensor (normal n) faces (h.n, the side the ray came from, is the other): from a sensor,
+// its own plane (a large occluder's, near the origin), which such rays meet only through that error; they pass, as tmin
+// means them to. A ray into the plane (a tilted sensor's, e.g. a vertex normal where a facade meets the ground) crosses
+// it for real and is blocked. ponytail: near the recentred origin offset_ray's 2^-16 m x cos(tilt) is under a km-sized
+// triangle's error, so such a ray can still miss the plane (t under tmin: +0.7 % for a 45 deg vertex sensor on a 2 km
+// ground); lift sensor origins with the scene's extent if that matters (default numbers move)
+static __forceinline__ __device__ bool own_plane(const Hit& h, float3 d, float3 n) {
+  return optixHitObjectGetRayTmax() * fabsf(dot(d, h.n)) < h.ext * 2.3841858e-7f && dot(n, h.n) <= 0.f;
 }
 static __forceinline__ __device__ float3 through(const Hit& h) { return offset_ray(h.p, -1.f * h.n) - h.lift; }   // the origin past it
 
-// A visibility ray's hit lies under 1/32 m above the plane of the sensor (normal n), as its own plane does for triangles
-// up to 2^17 m; higher hits cost nothing more. Read from the hit object: one more value live across the visibility
-// traversals (a mask, the direction) cost 1-2 % on --bench.
-static __forceinline__ __device__ bool low_hit(float3 n) {
-  return optixHitObjectGetRayTmax() * dot(n, optixHitObjectGetWorldRayDirection()) < 1.f / 32.f;
+// A visibility ray's reported hit is an own plane of the sensor (normal n): first one comparison, read from the hit
+// object (no value more live across the visibility traversals), the hit lies under 1/32 m above the sensor's plane, as
+// an own plane's does for triangles up to 2^17 m; only then its triangle is fetched. Any other hit blocks the ray.
+static __forceinline__ __device__ bool own_hit(float3 n) {
+  const float3 d = optixHitObjectGetWorldRayDirection();
+  Hit h;
+  return optixHitObjectGetRayTmax() * dot(n, d) < 1.f / 32.f && hit_triangle(h) && own_plane(h, d, n);
 }
-// ... then the ray is walked again by closest hits (the first hit reported need not be the nearest), on its own line,
-// past the sensor's own plane(s): the tmin the rest of the ray goes on from when nothing comes next or, with
-// translucent, a translucent slot; 0 = blocked.
-static __forceinline__ __device__ float past_own_plane(float3 o, float3 d, bool translucent) {
+// Then the ray is walked again by closest hits (the first hit reported need not be the nearest), on its own line, past
+// the sensor's own plane(s): the tmin the rest of the ray goes on from when nothing comes next or, with translucent, a
+// translucent slot; 0 = blocked.
+static __forceinline__ __device__ float past_own_plane(float3 o, float3 d, float3 n, bool translucent) {
   const unsigned flags = (params.rayFlags & ~OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT) | OPTIX_RAY_FLAG_DISABLE_ANYHIT;
   float tmin = 1e-5f;
   for (unsigned seg = 0; seg < 4; ++seg) {
@@ -73,7 +79,7 @@ static __forceinline__ __device__ float past_own_plane(float3 o, float3 d, bool 
     if (!optixHitObjectIsHit()) return tmin;
     Hit h;
     if (!hit_triangle(h)) return 0.f;
-    if (!own_plane(h, d)) return translucent && reinterpret_cast<const Slot*>(optixHitObjectGetSbtDataPointer())->tau > 0.f ? tmin : 0.f;
+    if (!own_plane(h, d, n)) return translucent && reinterpret_cast<const Slot*>(optixHitObjectGetSbtDataPointer())->tau > 0.f ? tmin : 0.f;
     tmin = __uint_as_float(__float_as_uint(optixHitObjectGetRayTmax()) + 1);   // the next float past it
   }
   return 0.f;
@@ -94,15 +100,16 @@ extern "C" __global__ void __raygen__bits() {
     // tmin 1e-5 m: ignore hits at the origin (sensor exactly in an occluder plane), as Radiance does; scenes are in metres
     optixTraverse(params.gas, o, dir, 1e-5f, FLT_MAX, 0.f, OptixVisibilityMask(1), params.rayFlags, 0, 1, 0);
     if (!optixHitObjectIsHit()) word |= 1u << k;
-    else if (low_hit(n) && past_own_plane(o, params.D[d], false) > 0.f) word |= 1u << k;   // D reloaded: see low_hit
+    else if (own_hit(n) && past_own_plane(o, params.D[d], n, false) > 0.f) word |= 1u << k;   // D reloaded: see own_hit
   }
   params.bits[w * params.nc + i] = word;
 }
 
 // Byte mode (a slot transmits): payload 0 = the transmittance along the ray (float bits), multiplied by __anyhit__tr at
 // every translucent crossing; stays 0 when culled or blocked. Past the sensor's own plane the ray is traced on again.
-// ponytail: a translucent own plane still passes its tau where float error meets it (any-hit, no hit reported); test
-// own_plane in __anyhit__tr (a vertex fetch per porous crossing) if sensors lie on large translucent sheets
+// ponytail: a translucent own plane still passes its tau where float error meets it (any-hit: no hit reported, or one
+// that is not an own plane); test own_plane in __anyhit__tr (a vertex fetch per porous crossing) if sensors lie on large
+// translucent sheets
 extern "C" __global__ void __raygen__bytes() {
   const uint3 li = optixGetLaunchIndex();
   const unsigned i = li.x, w = li.y;
@@ -118,9 +125,9 @@ extern "C" __global__ void __raygen__bytes() {
       optixTraverse(params.gas, o, dir, 1e-5f, FLT_MAX, 0.f, OptixVisibilityMask(1), params.rayFlags, 0, 1, 0, t);
       if (optixHitObjectIsHit()) {
         t = 0;
-        if (low_hit(n)) {
-          const float3 dd = params.D[d];   // reloaded: see low_hit
-          const float t0 = past_own_plane(o, dd, true);
+        if (own_hit(n)) {
+          const float3 dd = params.D[d];   // reloaded: see own_hit
+          const float t0 = past_own_plane(o, dd, n, true);
           if (t0 > 0.f) {
             t = __float_as_uint(1.f);
             optixTraverse(params.gas, o, dd, t0, FLT_MAX, 0.f, OptixVisibilityMask(1), params.rayFlags, 0, 1, 0, t);
@@ -220,7 +227,7 @@ extern "C" __global__ void __raygen__bounce() {
       const Slot sl = *reinterpret_cast<const Slot*>(optixHitObjectGetSbtDataPointer());
       Hit h;
       if (!hit_triangle(h)) break;
-      if (seg == 0 && own_plane(h, d)) { o = through(h); continue; }   // the first segment passes the sensor's own plane
+      if (seg == 0 && own_plane(h, d, n)) { o = through(h); continue; }   // the first segment passes the sensor's own plane
       if ((sl.flags & (kSlotThin | kSlotTwin)) == kSlotThin && h.front == ((sl.flags & kSlotInward) != 0)) { o = through(h); continue; }   // exit face
       const bool mirror = (sl.flags & kSlotGlass) != 0;
       float T = sl.tau, R = sl.rho;   // opaque: tau 0 (every slot with --transmission off)

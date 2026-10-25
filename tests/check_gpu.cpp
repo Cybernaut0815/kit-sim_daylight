@@ -42,6 +42,15 @@ static Mesh squares(const char* name, bool sensor, double z, double half, std::i
   }
   return m;
 }
+// An L: a 20 m wall (y 0, x -10..10, facing -y) standing on a 2 km ground at z -10, one quad or 100 m tiles.
+static Tris l_scene(bool tiles) {
+  Tris t;
+  const double s = tiles ? 100 : 2000;
+  for (double x = -1000; x < 1000; x += s)
+    for (double y = -1000; y < 1000; y += s) quad(t, f3(x, y, -10), f3(x + s, y, -10), f3(x + s, y + s, -10), f3(x, y + s, -10));
+  quad(t, f3(-10, 0, -10), f3(10, 0, -10), f3(10, 0, 10), f3(-10, 0, 10));
+  return t;
+}
 
 // Radiance glass port (glass.h) against rad5R4, run once: rtrace -ab 0 through a glass pane at z = 1 with tn =
 // tn_from_Tn(0.64) = 0.6975761815, a glow sky behind it, rays from the origin at 0 / 30 / 60 / 75 / 85 deg:
@@ -410,7 +419,34 @@ int check_gpu(const char* testsDir) {
       for (size_t d = 0; d < nq / 2; ++d) { zero += !alone[d]; crossed += alone[d] == 128; }
       CHECK(v == alone && zero == blocked && crossed > 100);
     }
-    std::printf("gpu: own planes of 1-10 km quads pass; a 1 cm curb blocks %zu directions with and without the 10 km quad\n", blocked);
+    // a sensor at the L's foot, its normal 45 deg between the wall's and the ground's (a vertex where a facade meets the
+    // street): offset_ray puts it 1.7e-4 m above the ground (256 ulps at z -10, x cos 45) and 1.1e-5 m before the wall
+    // (2^-16 m), the ground inside the 2 km quad's 2^-22 tolerance (4.8e-4 m). Its rays into either cross them for real
+    // and are blocked, as by 100 m tiles of the same plane; the rest of its hemisphere is open, in byte mode as the pane
+    // 50 m up alone shows it
+    Sensors sl; sl.p = {f3(0.37, 0, -10)}; sl.n = {unit(0, -1, 1)};
+    const auto pane40 = [](Tris& t) { quad(t, f3(0, -100, 40), f3(200, -100, 40), f3(200, 100, 40), f3(0, 100, 40), 1); };
+    Tris paneL;
+    pane40(paneL);
+    size_t lOpen = 0, lCrossed = 0;
+    if (vis(paneL, porous, sl, true, alone))
+      for (bool bytes : {false, true})
+        for (bool tiles : {false, true}) {
+          Tris tl = l_scene(tiles);
+          if (bytes) pane40(tl);
+          if (!vis(tl, bytes ? porous : std::vector<Slot>{Slot{}}, sl, bytes, v)) continue;
+          size_t wrong = 0;
+          lOpen = lCrossed = 0;
+          for (size_t d = 0; d < nq; ++d) {
+            const bool open = dotf(sl.n[0], Dq[d]) > 0 && Dq[d].z > 0 && Dq[d].y < 0;
+            wrong += v[d] != (open ? (bytes ? alone[d] : 1) : 0);
+            lOpen += open; lCrossed += open && alone[d] == 128;
+          }
+          CHECK(wrong == 0 && lOpen == nq / 4 && lCrossed > 50);   // up and away from the wall
+          if (wrong) std::printf("gpu: L on %s, %s: %zu of %zu directions wrong\n", tiles ? "100 m tiles" : "a 2 km quad", bytes ? "bytes" : "bits", wrong, nq);
+        }
+    std::printf("gpu: own planes of 1-10 km quads pass; a 1 cm curb blocks %zu directions with and without the 10 km quad; "
+                "an L's foot sees %zu open (%zu through the pane) on a 2 km quad as on tiles\n", blocked, lOpen, lCrossed);
   }
 
   // reflected light (gpu_bounce): a sensor's row holds its coefficient per bin (0 ground, 1 + p the patches of the sky
@@ -473,6 +509,18 @@ int check_gpu(const char* testsDir) {
       quad(wide, f3(-5000, -5000, 0), f3(5000, -5000, 0), f3(5000, 5000, 0), f3(-5000, 5000, 0));
       Sensors so; so.p = {f3(0, 0, 0), f3(0.01, 0.02, 0)}; so.n = {f3(0, 0, 1), f3(0, 0, -1)};
       CHECK(bounce(wide, {half}, so, Bounce{1, 4096}) && dc == std::vector<float>(nb * 2, 0.f));
+    }
+    // the L's foot sensor (45 deg, see the visibility check): its first segments into the ground or the wall meet them for
+    // real and reflect, so on the 2 km quad it gets the rows it gets on the 100 m tiles
+    {
+      Sensors sl; sl.p = {f3(0.37, 0, -10)}; sl.n = {unit(0, -1, 1)};
+      if (bounce(l_scene(true), {half}, sl, Bounce{1, 4096})) {
+        const std::vector<float> rows = dc;
+        double sum = 0;
+        for (float x : rows) sum += x;
+        CHECK(bounce(l_scene(false), {half}, sl, Bounce{1, 4096}) && dc == rows && sum > 0.1);
+        std::printf("gpu: bounce, the L's foot on a 2 km quad as on tiles: %.5f\n", sum);
+      }
     }
     // a chunk gives the rows its sensors have in the whole run: seeds from the global sensor index, sums in sample order,
     // whatever the launches (300 sensors start at 27 samples per launch, the chunk of the last 3 at 64)
