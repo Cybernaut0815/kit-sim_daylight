@@ -384,7 +384,10 @@ bool gpu_bounce(Gpu& g, size_t i0, size_t nc, unsigned rayFlags, const Bounce& b
   if (nc == 0) return true;
   CU(cudaMemset(g.dDc, 0, g.nBins * nc * sizeof(float)));
   // Every launch runs the whole chunk over the samples [done, done + n): a path costs a few closest hits, varying with
-  // the scene and N, so n starts at 2^13 paths (1 to 64 samples: a thread's run in turn), aims at 100 ms, at most doubles.
+  // the scene and N, so n starts at 2^13 / nc samples, 1 to 64 (a thread's run in turn: about max(nc, 2^13) paths, at
+  // most 64 per sensor), aims at 100 ms, at most doubles.
+  // ponytail: the first launch is one path per sensor of a big chunk (~450k at sky density 1: 0.09 s at --bench's 5 M
+  // paths/s, the slowest measured); give launches a slice of the chunk's sensors if scenes 20x slower appear.
   // ponytail: one thread per sensor keeps the row sums ordered without atomics, so small chunks (sky density 4: 29k
   // sensors) idle the GPU in launch tails where path costs vary widely (--bench's boxes, not a city); give each thread a
   // slice of a sensor's samples, with per-slice rows summed in order, if that matters

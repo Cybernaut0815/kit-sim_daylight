@@ -110,7 +110,7 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
   // ---- geometry ------------------------------------------------------------------------------------------------
   // Optics per global slot. --transmission off: every slot opaque (bits, no any-hit); --fresnel off: glass passes tau.
   // Only a slot with faces in the GAS transmits (not a sensor mesh's under --no-self-occlude, nor an id no face uses),
-  // and only those slots' rho matter to the bounce pass.
+  // and only those slots' rho and glass matter to the bounce pass (glass mirrors with --transmission off too).
   std::vector<Slot> slots;
   if (!resolve_optics(meshes, opt.optics, slots, err)) return false;
   std::vector<char> inGas(opt.transmission || reflect ? slots.size() : 0, 0);
@@ -121,15 +121,21 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
     else for (uint16_t s : m.slot) inGas[b + s] = 1;
   }
   std::string lit;   // the transmitting slots: built into the GAS (geometry flags, thin solids), so part of its identity
-  float rho0 = -1;   // reflect: rho of the first slot in the GAS
-  bool rhoDiffers = false;   // ... and another's differs: the bounce pass needs a hit record per slot
+  size_t first = SIZE_MAX;   // reflect: the first slot in the GAS
+  bool differs = false;      // ... and another's rho or glass differs: the bounce pass needs a hit record per slot
   for (size_t s = 0; s < slots.size(); ++s) {
     if (!opt.transmission || !inGas[s]) slots[s].tau = 0;
     if (!opt.fresnel) slots[s].flags &= ~kSlotGlass;
     if (slots[s].tau > 0) lit += (lit.empty() ? "" : ",") + std::to_string(s);
-    if (reflect && inGas[s]) { if (rho0 < 0) rho0 = slots[s].rho; else rhoDiffers = rhoDiffers || slots[s].rho != rho0; }
+    if (!reflect || !inGas[s]) continue;
+    if (first == SIZE_MAX) first = s;
+    const Slot &a = slots[s], &b = slots[first];
+    differs = differs || a.rho != b.rho || a.flags != b.flags || ((a.flags & kSlotGlass) && a.tn != b.tn);
   }
-  const bool translucent = !lit.empty(), slotted = translucent || rhoDiffers;   // per-triangle SBT offsets (gpu_build)
+  // ponytail: slots of differing optics give a bounce run the per-triangle layout (~20 % more GAS memory, a few % slower
+  // visibility) under a key of its own, so toggling --bounces on a resident scene rebuilds it or parks a second copy;
+  // read a hit's slot through its primitive index (Tris::slot on the device) instead if that matters
+  const bool translucent = !lit.empty(), slotted = translucent || differs;   // per-triangle SBT offsets (gpu_build)
   Resident& R = resident();
   const std::string key = opt.sceneKey.empty() || !slotted ? opt.sceneKey : opt.sceneKey + (translucent ? "\ntransmitting " + lit : "\nslot records");
   const bool installed = !key.empty() && R.gpu && key == R.cur.key;   // same meshes + selfOcclude as the scene in the Gpu
@@ -433,8 +439,8 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
         R.parked.pop_back();
       }
     }
-    // a GAS without per-slot records has one, every slot's (ids may run to 65535 per mesh): opaque, of their one rho
-    const std::vector<Slot> one{Slot{rho0 < 0 ? Slot{}.rho : rho0}};
+    // a GAS without per-slot records has one, every slot's (ids may run to 65535 per mesh): opaque, of their one rho / glass
+    const std::vector<Slot> one{first == SIZE_MAX ? Slot{} : slots[first]};
     if (!gpu_set_scene(*g, sens, D, err) || !gpu_set_slots(*g, slotted ? slots : one, err)) return false;
     // ponytail: 256 MiB cap on each per-chunk buffer, visibility (bits, or transmittance bytes), the series tile and the
     // bounce rows; make it a device-memory fraction if it ever thrashes. The rows follow --sky-density (P + 1 bins): at
@@ -510,7 +516,7 @@ bool run(const std::vector<Mesh>& meshes, const Weather* w, const Options& opt, 
                    st.traceMs > 0 ? static_cast<double>(st.rays) / st.traceMs / 1e6 : 0.0);
       if (reflect)
         std::fprintf(stderr, "info: reflected light: %d bounces, %d samples per sensor, %.3g paths in %.0f ms (%zu launches)%s\n", opt.bounces,
-                     opt.bounceSamples, static_cast<double>(st.paths), st.bounceMs, st.bounceLaunches, rhoDiffers ? ", a hit record per slot" : "");
+                     opt.bounceSamples, static_cast<double>(st.paths), st.bounceMs, st.bounceLaunches, differs ? ", a hit record per slot" : "");
     }
   }
   if (sf) {

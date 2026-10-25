@@ -191,7 +191,8 @@ unsigned thin_solid(const Mesh& m, unsigned s, const double c[3]) {
       if (a != b) { fwd.emplace_back(a, b); rev.emplace_back(b, a); }
     }
   std::sort(fwd.begin(), fwd.end()); std::sort(rev.begin(), rev.end());
-  return fwd == rev ? kSlotThin | (vol < 0 ? kSlotInward : 0u) : 0u;
+  if (fwd != rev) return 0;
+  return kSlotThin | (2 * std::fabs(vol) / area < 1e-5 ? kSlotTwin : vol < 0 ? kSlotInward : 0u);   // thinner than the weld grid: no volume
 }
 
 size_t make_sensors(const Mesh& m, const Options& opt, const double c[3], Sensors& out, std::string& warn) {

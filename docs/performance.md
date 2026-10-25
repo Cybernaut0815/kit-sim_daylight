@@ -38,13 +38,17 @@ the GPU shared with another session (15-30 % load, 79 C: the visibility pass ran
 
 Closest hits have no first-hit exit, so the pass depends on the geometry far more than the visibility does: `--bench`
 puts 833 k random boxes on 1 km^2, overlapping ~250 deep, the worst case for closest hits (30x slower per path than
-the city-like 10 k boxes; the visibility pass does not notice). A second bounce adds ~8 % (outdoors few paths survive
-the Russian roulette at the second reflection); time is linear in M. At sky density 4 the rows (2306 bins, 9 kB per
-sensor) cut chunks to 29 k sensors (35 chunks instead of 3), which costs the city-like scene nothing but slowed both
-passes of `--bench` (launch tails, there and in the visibility's smaller launches). Without `--bounces` the pass does
-not run and the visibility keeps its kernel (byte mode has its own raygen, the default bits one is the original):
-`--bench` best of 3 against the build before reflected light, interleaved, 1.37 vs 1.36 GRays/s (both throttled at
-88 C).
+the city-like 10 k boxes; the visibility pass does not notice). A second bounce adds 5-10 % in the city-like scene and
+16-49 % on `--bench` (one thread runs a sensor's paths, so the ~4 % that survive the Russian roulette at the second
+reflection keep most warps busy for another segment among the dense boxes); interiors, where paths stay long, pay more.
+Time is linear in M. With bounces, slots that differ in rho or glass give the GAS a hit record per slot (as a
+transmitting slot does: ~20 % more GAS memory, a few % slower visibility) under a resident-scene key of its own, so a
+server that switches bounces on and off for such a model rebuilds it each time or parks both. At sky density 4 the
+rows (2306 bins, 9 kB per sensor) cut chunks to 29 k sensors (35 chunks instead of 3), which costs the city-like scene
+nothing but slowed both passes of `--bench` (launch tails, there and in the visibility's smaller launches). Without
+`--bounces` the pass does not run and the visibility keeps its kernel (byte mode has its own raygen, the default bits
+one is the original): `--bench` best of 3 against the build before reflected light, interleaved, 1.37 vs 1.36 GRays/s
+(both throttled at 88 C).
 
 Noise (canyon fixture, 400 facade sensors with a ground mesh, one bounce, against M = 65536): at M 1024 the annual
 radiation is within 0.5 % (median sensor) and 2.3 % (95th percentile) of the reference, the reflected part itself

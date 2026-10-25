@@ -98,6 +98,17 @@ def scene_canopy(optics):
     return s
 
 
+def scene_canopy_ground(optics):
+    """canopy over an opaque ground mesh (rho 0.2, 40 x 40 m at z 0), flat's grid 0.5 m up facing up and again facing
+    down: light the sheet passes after the ground reflected it (porous tau, glass T(cos)), and with two reflections what
+    goes back and forth between sheet and ground."""
+    s = scene_canopy(optics)
+    s['sensors'] = [(n, merge([grid((-5, -5, 0.5), (1, 0, 0), (0, 1, 0), 10, 10, 1, (0, 0, z))]))
+                    for n, z in (('up', 1), ('down', -1))]
+    s['context'].append(('ground', merge([grid((-20, -20, 0), (1, 0, 0), (0, 1, 0), 1, 1, 40, (0, 0, 1))])))
+    return s
+
+
 def scene_canyon():
     """Street canyon, H/W 1: two facing 20 x 10 m walls 10 m apart and the ground between them (context, opaque rho 0.2),
     a sensor grid on each wall (1 m cells, facing the street; runs use --no-self-occlude)."""
@@ -114,10 +125,12 @@ def scene_plane():
             'context': [('plane', merge([grid((-1000, -1000, 0), (1, 0, 0), (0, 1, 0), 1, 1, 2000, (0, 0, 1))]))]}
 
 
-# canopy: compare.py transmit; glass_canopy, canyon and plane: the reflected-light layer
+# canopy: compare.py transmit; glass_canopy, the *_ground canopies, canyon and plane: the reflected-light layer
 SCENES = {'flat': scene_flat, 'flat_tri': lambda: scene_flat(True), 'walls': scene_walls, 'box': scene_box,
           'tilt30': scene_tilt30, 'overhang': scene_overhang, 'canopy': lambda: scene_canopy((0.2, 0.5, 'porous')),
-          'glass_canopy': lambda: scene_canopy((0, 0.64, 'glass')), 'canyon': scene_canyon, 'plane': scene_plane}
+          'glass_canopy': lambda: scene_canopy((0, 0.64, 'glass')),
+          'canopy_ground': lambda: scene_canopy_ground((0.2, 0.5, 'porous')),
+          'glass_canopy_ground': lambda: scene_canopy_ground((0, 0.64, 'glass')), 'canyon': scene_canyon, 'plane': scene_plane}
 
 
 def write_obj(path, meshes):

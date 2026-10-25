@@ -34,8 +34,9 @@ used freed first, and while less than 1 GB is free), so users who alternate betw
 range (also ladybug mode with transmission or bounces) and on rows the meshes do not resolve (unknown or ambiguous name,
 slot out of range, a row given twice; the server reports a job error). Values may change between runs of one key
 without a rebuild; a slot that starts or stops transmitting rebuilds, and so does a run with bounces whose slots start
-or stop differing in rho (the set of transmitting slots, and with bounces whether rho differs, are part of the
-identity: the acceleration structure then carries a hit record per slot). `Options::cancel` points to an `std::atomic<bool>` another
+or stop differing in rho or glass (the set of transmitting slots, and with bounces whether the slots differ, are part
+of the identity: the acceleration structure then carries a hit record per slot, so switching bounces on and off for a
+model with several materials rebuilds it each time, or keeps both copies with `residentScenes` > 1). `Options::cancel` points to an `std::atomic<bool>` another
 thread may set: `run()` then stops at its next check (before the sky model, before the GPU, per trace chunk, per
 reflected-light launch) and fails with "cancelled". `run()` itself is one call at a time per process (one GPU, one owner thread). `src/cli.h` (`daylight::cli::parse` / `prepare` / `manifest_json`) exposes the CLI's
 flag parsing, weather / time rules and manifest for front ends that accept CLI flags verbatim.

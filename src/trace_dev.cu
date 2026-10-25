@@ -24,6 +24,9 @@ static __forceinline__ __device__ float3 offset_ray(float3 p, float3 n) {
 }
 
 // Every slot opaque: no payload, no any-hit (the hot path of default runs; byte mode has its own raygen).
+// ponytail: a sensor in the plane of an occluder triangle over ~500 m near the origin (a flat scene's ground quad) loses
+// rays to false hits on it, the hardware erring past offset_ray's 2^-16 m (-11 % radiation on a 2 km quad); give both
+// visibility raygens __raygen__bounce's own-plane test if flat scenes matter (default numbers move, re-record goldens)
 extern "C" __global__ void __raygen__bits() {
   const uint3 li = optixGetLaunchIndex();
   const unsigned i = li.x, w = li.y;
@@ -128,10 +131,11 @@ static __forceinline__ __device__ unsigned sky_bin(float3 d) {
 
 // Reflected light, one launch index per sensor i of the chunk, its samples [s0, s1) of M. Sample s leaves the sensor
 // cosine-weighted (Hammersley point s, Cranley-Patterson rotated by a hash of the global sensor index) and goes from
-// closest hit to closest hit: a thin solid's exit face passes it unchanged; elsewhere it is transmitted with probability
-// T / (T + R) (translucent slots: porous tau, Radiance glass T(cos)), weight x (T + R), else reflected, by the mirror on
-// glass, else diffusely (rho; these count toward params.bounces, Russian roulette from the second on: survival = the
-// weight). A path that reflected and escapes adds weight x pi / M to its bin; transmit-only paths are the direct pass's.
+// closest hit to closest hit: the sensor's own plane and a thin solid's exit face pass it unchanged; elsewhere it is
+// transmitted with probability T / (T + R) (translucent slots: porous tau, Radiance glass T(cos)), weight x (T + R), else
+// reflected, by the mirror on glass (also opaque glass: T 0), else diffusely (rho; these count toward params.bounces,
+// Russian roulette from the second on: survival = the weight). A path that reflected and escapes adds weight x pi / M
+// to its bin; transmit-only paths are the direct pass's.
 // Random numbers: pcg3d(global sensor, sample, event), so rows do not depend on how sensors or samples are launched.
 // Thread i alone adds to row i, in sample order: no atomics, deterministic.
 // ponytail: rows sum in float; a bin fed by all of M = 65536 paths rounds by ~5e-4 (a few hundred paths per bin, the
@@ -167,10 +171,14 @@ extern "C" __global__ void __raygen__bounce() {
       // near the origin met it, or its coplanar neighbour, again.
       const float ext = fmaxf(fmaxf(fmaxf(fabsf(e1.x), fabsf(e1.y)), fmaxf(fabsf(e1.z), fabsf(e2.x))), fmaxf(fabsf(e2.y), fabsf(e2.z)));
       const float3 lift = (ext * 9.5367432e-7f) * ng;
-      if ((sl.flags & kSlotThin) && front == ((sl.flags & kSlotInward) != 0)) { o = offset_ray(p, -1.f * ng) - lift; continue; }   // exit face
-      const bool mirror = sl.tau > 0.f && (sl.flags & kSlotGlass);
+      // The first segment passes the sensor's own plane: a hit whose plane lies within 2^-22 x its triangle's extent of
+      // the origin (8x the hardware's error; a sensor in a large occluder's plane near the origin), as the direct pass's
+      // tmin means it to
+      if (seg == 0 && optixHitObjectGetRayTmax() * fabsf(dot(d, ng)) < ext * 2.3841858e-7f) { o = offset_ray(p, -1.f * ng) - lift; continue; }
+      if ((sl.flags & (kSlotThin | kSlotTwin)) == kSlotThin && front == ((sl.flags & kSlotInward) != 0)) { o = offset_ray(p, -1.f * ng) - lift; continue; }   // exit face
+      const bool mirror = (sl.flags & kSlotGlass) != 0;
       float T = sl.tau, R = sl.rho;   // opaque: tau 0 (every slot with --transmission off)
-      if (mirror) glass_TR(fabsf(dot(d, ng)), sl.tn, T, R);
+      if (mirror) { glass_TR(fabsf(dot(d, ng)), sl.tn, T, R); if (!(sl.tau > 0.f)) T = 0.f; }   // off: mirrors R, absorbs T
       else if (diffuse == params.bounces) R = 0.f;   // no diffuse reflection left: transmitted or absorbed
       if (!(T + R > 0.f)) break;
       const uint3 h = pcg3d(gi, s, k++);

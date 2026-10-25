@@ -70,8 +70,10 @@ bool optics_ok(const Options& opt, std::string& err);
 bool resolve_optics(const std::vector<Mesh>& meshes, const std::vector<Optics>& rows, std::vector<Slot>& out, std::string& err);
 // Faces of slot s in m (recentred by c) as one closed thin solid: positions welded on a 1e-5 m grid, every edge used
 // as often in each direction (closed, consistently wound), 2 |V| / S < 0.1 m -> kSlotThin, | kSlotInward when the signed
-// volume is negative; else 0. ponytail: per slot, not per connected component (a pane box sharing its slot with an open
-// sheet is not thin, so it passes tau twice); split the slot's faces into components if such slots matter.
+// volume is negative, | kSlotTwin instead when 2 |V| / S is below the weld grid (faces repeated with the opposite
+// winding: a double-faced sheet, or a box exported so, whose volumes cancel); else 0. ponytail: per slot, not per
+// connected component (a pane box sharing its slot with an open sheet is not thin, so it passes tau twice); split the
+// slot's faces into components if such slots matter.
 unsigned thin_solid(const Mesh& m, unsigned s, const double c[3]);
 // Sensor points/normals per face or per point per opt (mode rules, offset, sides). Appends to out: one entry per
 // element, or two consecutive entries (front, back) when sides == Both. Returns the element count (faces or points).
@@ -126,8 +128,8 @@ bool gpu_series(Gpu& g, size_t nc, const SeriesIn& in, float* E, std::string& er
 // __raygen__bounce), binned by where they escape into rows dc(b, i) that stay on device (bin b = 0 ground, 1..P the
 // Reinhart patches of mf in gendaymtx order, true north = the model's turned by -north; weight pi / M per path, so
 // sum_b dc(b, i) L_b is the reflected irradiance under bin radiances L). Sub-launches over sample ranges of the whole
-// chunk, TDR-safe like gpu_trace's byte mode (2^13 paths first, 1 to 64 samples per sensor, then ~100 ms, at most
-// doubling); cancel is checked between them.
+// chunk, TDR-safe like gpu_trace's byte mode (first 2^13 / nc samples per sensor, 1 to 64: about max(nc, 2^13) paths;
+// then ~100 ms, at most doubling); cancel is checked between them.
 struct Bounce { unsigned N = 1, M = 1024; int mf = 1; double north = 0; const std::atomic<bool>* cancel = nullptr; };
 bool gpu_bounce(Gpu& g, size_t i0, size_t nc, unsigned rayFlags, const Bounce& b, std::string& err);
 bool gpu_reduce_dc(Gpu& g, size_t nc, const float* W, double* out, std::string& err);   // out[i] = sum_b dc(b, i) * W[b], double

@@ -13,7 +13,7 @@ uv run fixtures.py                       # scenes -> _out/fixtures/<scene>/{sens
 uv run reference.py                      # gendaymtx / Sunpath / pvlib / RadiationStudy / DirectSunStudy + layers 8 / 9's rcontrib -> _out/ref/  (~12 min)
 uv run reference.py --all                # every EPW in _dl/epw (default: Boston + Chicago)
 uv run reference.py --epw --scene canopy # only layer 8's reference: nodni.epw skies + rcontrib -ab 1..3 at -ad 8192 / 32768 (~30 s)
-uv run reference.py --scene canopy glass_canopy canyon plane          # layers 8 and 9: + the --epw skies (~3 min, 6 rcontrib at a time)
+uv run reference.py --scene canopy glass_canopy canopy_ground glass_canopy_ground canyon plane   # layers 8 and 9: + the --epw skies (~5 min, 6 rcontrib at a time)
 uv run compare.py selftest               # parser + residual-decomposition unit checks, no CLI needed
 uv run compare.py all --exe ../build/RelWithDebInfo/daylight.exe      # layers 1a, 2, 3, 4a, 4b, 4c, 6, 7, 8, 9; exit 1 on hard failures
 uv run compare.py bits --exe ... --scene box --epw USA_MA_Boston-City.WSO_TMY
@@ -40,7 +40,7 @@ the same command a user runs on their own stage (see `bindings/python/README.md`
 | `_out/ref/epw/<stem>/` | `wea.wea` (written by ladybug, x.5 hours), `sky_m{1,2}_{d,s}_O1_A.txt` (`gendaymtx -A` ASCII), `suns_D.npz` (`-D` suns: hoy, vec, rad), `sunpath.npz` (alt, azi, up, vec), `pvlib.npz`, `skymtx_m*_n*.npz` (ladybug per-patch kWh/m2) |
 | `_out/ref/scene/<scene>/` | `imtx_m{mf}_n{north}_{face,vertex}.npy` (RadiationStudy intersection matrix, float cos x visible, columns `[sky | ground]`), `rad_<stem>_<tag>.npy`, `sun_imtx_<stem>_*.npy` (bool `[N x n_up]`), `sunhours_<stem>_*.npy` |
 | `_out/ref/epw/<stem>/skysum_m1.npz` | nodni and the `--epw` EPWs (with a DC scene): `gendaymtx -m 1 -O1` / `-O0 -of` (sun binned) summed over the 8760 rows (`O1`, `O0` float64 `[146 bins x RGB]`, bin 0 = ground; `rows`) |
-| `_out/ref/scene/{canopy,glass_canopy,canyon,plane}/` | `scene.rad` / `scene.oct` (sky glow + context polygons with their materials), `dc_ab{1,2,3}_ad{8192,32768}.npy` (rcontrib coefficients float32 `[N x 146 bins x RGB]`) |
+| `_out/ref/scene/{canopy,glass_canopy,canopy_ground,glass_canopy_ground,canyon,plane}/` | `scene.rad` / `scene.oct` (sky glow + context polygons with their materials), `dc_ab{1,2,3}_ad{8192,32768}.npy` (rcontrib coefficients float32 `[N x 146 bins x RGB]`) |
 | `_out/ref/index.json` | file index with timings |
 | `_out/run/<case>/` | CLI outputs per compare case (`out.txt`, `out.txt.json`, `bits.npy`, `sky.txt`, `sun.txt`) |
 | `_out/golden/<case>/` | golden.py byte goldens: `out.npy` + `out.npy.json`, `series.npy` + `series.npy.hoys.txt`, `bits.npy` where the case asks; `recorded.txt` = commit + exe they came from. Variants (slot-block `.dmesh`, opaque `--optics` with `--transmission` off and on, translucent rows with `--transmission off`, `--bounces 0`) are compared to their base case's files and run once `daylight --help` lists their flags |
@@ -50,9 +50,11 @@ mesh order north, east, south, west; `box` = flat + two open 4x4x6 m boxes (no b
 `tilt30` 6x6 m plane tilted 30 deg to the south, 0.5 m cells; `overhang` 6x3 m south wall with a 1.5 m slab on top in
 the same mesh (self-shading: the reference passes the mesh itself as context, the CLI runs without `--no-self-occlude`);
 `canopy` = flat under a 6x6 m single sheet at 3 m (x -2..4, y -3..3, 1 m quads), porous rho 0.2 tau 0.5;
-`glass_canopy` the same sheet as glass tau 0.64; `canyon` two facing 20x10 m walls 10 m apart and the ground between
-them (context, opaque), a sensor grid on each wall (1 m cells); `plane` flat's grid 1 m above a 2 km plane (context,
-opaque), facing down. The last three are for the reflected-light layer.
+`glass_canopy` the same sheet as glass tau 0.64; `canopy_ground` / `glass_canopy_ground` the two sheets over a 40x40 m
+opaque ground mesh, flat's grid 0.5 m up facing up and again facing down (the sheet passes what the ground reflects,
+two reflections go back and forth); `canyon` two facing 20x10 m walls 10 m apart and the ground between them (context,
+opaque), a sensor grid on each wall (1 m cells); `plane` flat's grid 1 m above a 2 km plane (context, opaque), facing
+down. All but canopy are for the reflected-light layer.
 
 ## Tolerances (compare.py)
 
@@ -73,9 +75,9 @@ opaque), facing down. The last three are for the reflected-light layer.
 | 7 clearsky | pvlib `Location.get_clearsky(model='ineichen', linke_turbidity=3)` on the same 8760 mid-hours (SPA, year 2017) | `--clear-sky --lat 42.35 --lon -71.07 --tz -5` dumped DNI / DHI (`--dump-sun` columns 11-12): max rel diff where pvlib apparent elevation > 5 deg; annual sum rel diff; rows zero on one side and > 1 W/m2 on the other; flat `--quantity irradiance` vs `mean(DHI + DNI sin alt)` | 0.5 %; 0.3 %; 10 (info); 2 % (info) | yes / info |
 | 8 transmit | rcontrib `-ab 1` with materials, gendaymtx `-O1` / `-O0` skies of `nodni.epw` | canopy, `--transmission on --patch-samples 64 --sky-density 1 --no-self-occlude` + its `--optics`, radiation and illuminance against the `-ad 32768` run: `\|sum ours / sum ref - 1\|`; per-sensor p95 of `\|ours / ref - 1\|` (budget below); 3 sigma of rcontrib's per-sensor noise (`-ad 8192` vs `32768`, noise ~ 1/sqrt(ad)) | 1 %; 0.5 %; 0.5 % | yes / yes / info |
 | 9 reflect | closed form | `plane`: rcontrib `-ab 2`'s share of the plane's reflected light per MF 1 row vs the cosine law `rho pi (sin^2 a1 - sin^2 a0)`; ours `--bounces 1` vs rho x ours' unobstructed `flat` | 5 sigma; 5e-4 | yes |
-| 9 reflect | rcontrib `-ab N+1` with materials, `nodni.epw` skies | totals of layer 8's flags + `--bounces N --bounce-samples 65536`, N = 1, 2 (canyon also N = 0: the physical direct pass) on canyon, canopy, glass canopy, radiation and illuminance: `\|sum ours / sum ref - 1\|`; per-sensor p95 of `\|ours - ref\| / ref` | 2 % (N = 0: 1 %); budget (canopies 0.5 %, canyon 0.9 %) + 3 sigma | yes |
+| 9 reflect | rcontrib `-ab N+1` with materials, `nodni.epw` skies | totals of layer 8's flags + `--bounces N --bounce-samples 65536`, N = 1, 2 (canyon also N = 0: the physical direct pass) on canyon, both canopies, both over a ground, radiation and illuminance: `\|sum ours / sum ref - 1\|`; per-sensor p95 of `\|ours - ref\| / ref` | 2 % (N = 0: 1 %); budget (canopies 0.5 %, canyon 0.9 %) + 3 sigma | yes |
 | 9 reflect | rcontrib `-ab 1`'s ground bin, `nodni.epw` | the glass canopy's mirror, ours N = 1 - ours N = 0: sum; per-sensor p95 of the difference / the sensor's reference total | 3 %; 0.1 % + 3 sigma | yes |
-| 9 reflect | rcontrib `-ab N+1` - `-ab 1`, the `--epw` years, sun binned on both sides | reflected light ours N - ours 0, canyon and canopy, N = 1, 2: sum; per-sensor p95 of the difference / the sensor's reference total | 3 %; 0.1 % + 3 sigma | yes |
+| 9 reflect | rcontrib `-ab N+1` - `-ab 1`, the `--epw` years, sun binned on both sides | reflected light ours N - ours 0, canyon, canopy and canopy_ground, N = 1, 2: sum; per-sensor p95 of the difference / the sensor's reference total | 3 %; 0.1 % + 3 sigma | yes |
 | 9 reflect | both | 3 sigma of the per-sensor noise relative to the reference total: ours from a copy of its sensors in the same run, rcontrib from `-ad 8192` vs `32768` | - | info |
 
 Layer 7 needs no EPW reference: the clear-sky weather is synthetic (Ineichen-Perez, Linke turbidity 3, sea level).
@@ -134,11 +136,15 @@ a budget + 3 sigma, hard:
 Measured at ebaaa86: plane rows 2.0 sigma, ours on the plane 1.6e-5 of rho x flat. Totals on nodni (sums; p95 against
 the limit): canyon N = 0 -0.18 % / -0.03 % (radiation / illuminance), 0.74 % / 0.70 % against 1.13 %; N = 1, 2 -0.15
 to -0.14 % / -0.01 to 0.00 %, 0.69-0.70 % / 0.63-0.64 % against 1.31-1.35 %; canopy +0.03-0.04 % / +0.16-0.17 %,
-0.09-0.10 % / 0.22-0.23 % against 0.57 %; glass canopy -0.01 % / +0.12 %, 0.08-0.09 % / 0.17-0.18 % against 0.55 %. The
+0.09-0.10 % / 0.22-0.23 % against 0.57 %; glass canopy -0.01 % / +0.12 %, 0.08-0.09 % / 0.17-0.18 % against 0.55 %;
+over a ground (measured at the review fix after ebaaa86) porous +0.03 % / +0.16 %, 0.37-0.40 % against 0.99-1.02 %,
+glass -0.02 to -0.01 % / +0.11 to +0.12 %, 0.32-0.36 % against 0.89-0.91 %. The
 glass mirror (0.42 % of the total) +0.01 % / +0.14 %, p95 0.020 % of the total against 0.13 %. Reflected light, Boston
 and Chicago: canyon (11 % of the total, 25 % on the north-facing wall) sums +0.40 to +0.61 %, p95 0.51-0.65 % of the
 total against 0.84-0.97 % (3 sigma 0.74-0.86 %: rcontrib 0.21-0.24 %, ours 0.12-0.17 % per sensor); canopy (1.2 %: the
-sheet's underside) -0.43 to +0.02 %, p95 0.11-0.14 % against 0.29-0.34 %. The default EPWs' totals are not compared:
+sheet's underside) -0.43 to +0.02 %, p95 0.11-0.14 % against 0.29-0.34 %; canopy over the ground (17 % of the total,
+all of a face looking down) +0.33 to +0.39 % / +0.42 to +0.47 %, p95 0.98-1.20 % against 1.20-1.36 % (mostly 3 sigma:
+the down-facing faces see nothing else). The default EPWs' totals are not compared:
 ours' direct pass takes the exact sun, rcontrib the binned one.
 
 Relative errors use `max(|lb|, 1e-3 max|lb|)` as the scale. W per direction is reconstructed from the ladybug

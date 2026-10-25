@@ -276,7 +276,7 @@ int check_mesh(const char* testsDir) {
   }
 
   // --- thin solids: a 20 x 20 x 0.01 m pane box, indexed and as a soup (welded), flipped (inward), open, the 3 m cube,
-  //     two touching panes in one slot, a frame (slot 0) sharing the glass box's (slot 1) corners
+  //     two touching panes in one slot, a frame (slot 0) sharing the glass box's (slot 1) corners, double-faced meshes
   {
     const Mesh pane = box_mesh("pane", 0, 0, 1, 20, 20, 1.01, false), soup = box_mesh("pane", 0, 0, 1, 20, 20, 1.01, true);
     CHECK(soup.numPoints() == 24 && pane.numPoints() == 8);
@@ -299,6 +299,14 @@ int check_mesh(const char* testsDir) {
     win.indices.insert(win.indices.end(), {8, 9, 1, 0, 9, 10, 3, 1, 10, 11, 2, 3, 11, 8, 0, 2});
     win.slot = {1, 1, 1, 1, 1, 1, 0, 0, 0, 0};
     CHECK(thin_solid(win, 1, zero) == kSlotThin && thin_solid(win, 0, zero) == 0);
+    // double-faced: every face repeated with the opposite winding (SketchUp's two-sided export), its twin after or
+    // before it, indexed or a soup; a pane box exported so (volumes cancel): closed, no volume -> twin, never inward
+    Mesh twin = polygon({0, 0, 1, 2, 0, 1, 2, 2, 1, 0, 2, 1});
+    twin.counts.push_back(4); twin.indices.insert(twin.indices.end(), {3, 2, 1, 0});
+    Mesh twinFirst = twin; twinFirst.indices = {3, 2, 1, 0, 0, 1, 2, 3};
+    Mesh twinSoup = twin; twinSoup.points.insert(twinSoup.points.end(), {0, 2, 1, 2, 2, 1, 2, 0, 1, 0, 0, 1}); twinSoup.indices = {0, 1, 2, 3, 4, 5, 6, 7};
+    for (const Mesh* m : {&twin, &twinFirst, &twinSoup}) CHECK(thin_solid(*m, 0, zero) == (kSlotThin | kSlotTwin) && thin_solid(*m, 0, far) == (kSlotThin | kSlotTwin));
+    CHECK(thin_solid(merged(pane, flipped), 0, zero) == (kSlotThin | kSlotTwin));
   }
 
   // --- --optics grammar (cli::parse): split at the last '=', /SLOT only as trailing digits, kind, ';' packing, repeats

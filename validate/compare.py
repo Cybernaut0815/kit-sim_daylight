@@ -38,7 +38,8 @@ TOL = {'sky_ascii_rows': 0, 'sun_noaa_deg': 1e-6, 'sun_flips': 0, 'sun_radiance_
        'analytic_flat': 0.01, 'analytic_direct': 1e-3, 'analytic_north': 1e-6, 'usd_rel': 1e-5,
        'clearsky_rel': 5e-3, 'clearsky_sum_rel': 3e-3, 'transmit_bias': 0.01, 'transmit_p95': 5e-3,
        'reflect_total': 0.02, 'reflect_part': 0.03, 'reflect_part_budget': 1e-3, 'reflect_cosine': 5.0, 'reflect_plane': 5e-4,
-       'reflect_budget': {'canyon': 9e-3, 'canopy': 5e-3, 'glass_canopy': 5e-3}}   # reflect_*: layer_reflect
+       'reflect_budget': {'canyon': 9e-3, 'canopy': 5e-3, 'glass_canopy': 5e-3, 'canopy_ground': 5e-3,
+                          'glass_canopy_ground': 5e-3}}   # reflect_*: layer_reflect
 RGB_W = np.array([0.265074126, 0.670114631, 0.064811243])     # src/run.cpp bright(): Radiance CIE_rf / gf / bf
 ROWS, FAILS = [], []
 
@@ -480,11 +481,13 @@ def layer_reflect(exe, epws, scenes):
     materials, radiation and illuminance. Closed forms first: one reflection off a 2 km plane must follow the cosine law
     in rcontrib (a check of the reference) and give rho x ours' own unobstructed horizontal value. Totals on nodni.epw,
     sky only (ours' direct pass takes the exact sun, rcontrib the binned one): canyon (N = 0 too: the physical direct
-    pass on walls), porous canopy, glass canopy, whose reflected light is its mirror, in rcontrib's -ab 1 ground bin.
-    Reflected part ours N - ours 0 against DC ab N + 1 - DC ab 1 on the --epw years, the sun binned on both sides as
-    gendaymtx does, glass-free scenes (rcontrib -ab 1 holds the glass mirror, ours' N = 0 does not). Per sensor the
-    p95 of |ours - ref| / the sensor's reference total is held to a budget + 3 sigma, sigma = the measured noise of both
-    sides: ours' from a copy of the sensors in the same run (independent seeds), rcontrib's from -ad 8192 vs 32768."""
+    pass on walls), porous canopy, glass canopy, whose reflected light is its mirror, in rcontrib's -ab 1 ground bin, and
+    both canopies over a ground mesh (sensors looking up and down: the sheet passes what the ground reflected, N = 2 goes
+    back and forth). Reflected part ours N - ours 0 against DC ab N + 1 - DC ab 1 on the --epw years, the sun binned on
+    both sides as gendaymtx does, glass-free scenes (rcontrib -ab 1 holds the glass mirror, ours' N = 0 does not). Per
+    sensor the p95 of |ours - ref| / the sensor's reference total is held to a budget + 3 sigma, sigma = the measured
+    noise of both sides: ours' from a copy of the sensors in the same run (independent seeds), rcontrib's from -ad 8192
+    vs 32768."""
     m = 65536
     dc = lambda scene, ab, stem, bins=slice(None): [dc_ref(scene, ab, ad, stem, bins) for ad in (8192, 32768)]
 
@@ -509,7 +512,7 @@ def layer_reflect(exe, epws, scenes):
     # totals on the sky-only year. Budgets of the direct pass, which carries most of each total: the canopies' is layer
     # 8's; the canyon's walls see the sky at the NOAA apparent sun (gendaymtx: sun.c) up to -0.41 % off (a bare south
     # wall against rcontrib) and cut patches that 64 samples resolve to p95 0.54 % (0.15 % at 4096, rcontrib's noise)
-    for scene in ('canyon', 'canopy', 'glass_canopy'):
+    for scene in ('canyon', 'canopy', 'glass_canopy', 'canopy_ground', 'glass_canopy_ground'):
         for n in (0, 1, 2) if scene == 'canyon' else (1, 2):
             lo, hi = dc(scene, n + 1, 'nodni')
             check(f'{scene} nodni N={n}', *optics_run(exe, scene, 'nodni', n, m), lo, hi, hi, TOL['transmit_bias' if n == 0 else 'reflect_total'],
@@ -520,7 +523,7 @@ def layer_reflect(exe, epws, scenes):
     o0, (ours, copy) = optics_run(exe, 'glass_canopy', 'nodni')[0], optics_run(exe, 'glass_canopy', 'nodni', 1, m)
     check('glass_canopy nodni N=1 mirror', ours - o0, copy - o0, *dc('glass_canopy', 1, 'nodni', slice(0, 1)), dc_ref('glass_canopy', 1, 32768, 'nodni'),
           TOL['reflect_part'], TOL['reflect_part_budget'], 'reflected')
-    for scene in ('canyon', 'canopy'):
+    for scene in ('canyon', 'canopy', 'canopy_ground'):
         for stem in epws:
             o0, (lo1, hi1) = optics_run(exe, scene, stem)[0], dc(scene, 1, stem)
             for n in (1, 2):

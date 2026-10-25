@@ -14,6 +14,8 @@ enum : unsigned {
   kSlotGlass = 1,         // transmittance by angle (Radiance glass); else tau at every angle (porous, --fresnel off)
   kSlotThin = 2,          // closed thin solid (a pane modelled as a box): the exit face passes everything
   kSlotInward = 4,        // ... wound inward: entry is the back face
+  kSlotTwin = 8,          // ... of no volume, faces in coincident pairs (a double-faced sheet): closest hits meet either twin
+                          // first, so the bounce pass takes every face as an entry (one event per pair); any-hit sees both
 };
 
 struct Params {

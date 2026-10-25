@@ -3,7 +3,7 @@
 
   uv run reference.py [--epw STEM ...] [--scene NAME ...] [--all]      default: Boston + Chicago, all scenes
   uv run reference.py --epw --scene canopy                              only the rcontrib reference of layer 8
-  uv run reference.py --scene canopy glass_canopy canyon plane          the rcontrib references of layers 8 and 9
+  uv run reference.py --scene canopy glass_canopy canopy_ground glass_canopy_ground canyon plane   layers 8 and 9
 
 Per EPW (<ref>/epw/<stem>/): gendaymtx -m 1/2 -d/-s -O1 -A ASCII outputs (sky_m{1,2}_{d,s}_O1_A.txt), gendaymtx -D
 suns (suns_D.npz), ladybug Sunpath (sunpath.npz), pvlib SPA (pvlib.npz), and ladybug SkyMatrix kWh/m2 per patch
@@ -47,7 +47,8 @@ GENDAYMTX, RCONTRIB, OCONV = (str(Path(folders.radbin_path) / f'{x}.exe') for x 
 RAYPATH = str(Path(folders.radiance_path) / 'lib')                     # reinhart.cal
 DEFAULT_EPWS = ['USA_MA_Boston-City.WSO_TMY', 'USA_IL_Chicago-OHare.Intl.AP.725300_TMY3']
 SCENES = ['flat', 'flat_tri', 'walls', 'box', 'tilt30', 'overhang']
-DC_SCENES = ['canopy', 'glass_canopy', 'canyon', 'plane']   # rcontrib with materials (compare.py transmit, reflect)
+# rcontrib with materials (compare.py transmit, reflect)
+DC_SCENES = ['canopy', 'glass_canopy', 'canopy_ground', 'glass_canopy_ground', 'canyon', 'plane']
 DC_AB = (1, 2, 3)           # -ab N + 1 = N diffuse reflections (the sensor's own hemisphere takes the first bounce)
 DC_AD = (8192, 32768)       # two -ad: their difference measures rcontrib's noise
 SKYGLOW = ['void glow skyglow 0 0 4 1 1 1 0', 'skyglow source sky 0 0 4 0 0 1 180', 'skyglow source ground 0 0 4 0 0 -1 180']
