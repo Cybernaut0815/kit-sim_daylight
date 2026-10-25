@@ -4,7 +4,8 @@ project(daylight LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_ARCHITECTURES "75-real;75-virtual" CACHE STRING "architectures for the plain CUDA kernels")
+# Own knob, not CMAKE_CUDA_ARCHITECTURES: project() (ours, or the server's before add_subdirectory) already cached nvcc's 52.
+set(DAYLIGHT_CUDA_ARCHITECTURES "75-real;75-virtual" CACHE STRING "CUDA_ARCHITECTURES of src/gpu.cu (the OptiX-IR stays compute_75)")
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 
 find_package(CUDAToolkit 12.6 REQUIRED)
@@ -38,6 +39,7 @@ add_custom_command(OUTPUT "${GEN}/trace_optixir.h"
 set(CXX_WARN /W4 /WX /permissive- /fp:precise /utf-8 /EHsc)
 
 add_library(daylightcore STATIC src/mesh.cpp src/sky.cpp src/solar.cpp src/run.cpp src/cli.cpp src/gpu.cu "${GEN}/trace_optixir.h")
+set_target_properties(daylightcore PROPERTIES CUDA_ARCHITECTURES "${DAYLIGHT_CUDA_ARCHITECTURES}")
 target_include_directories(daylightcore PUBLIC src PRIVATE "${OPTIX_INCLUDE}" "${earcut_SOURCE_DIR}/include" "${GEN}")
 target_link_libraries(daylightcore PUBLIC CUDA::cudart_static)
 target_compile_definitions(daylightcore PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)

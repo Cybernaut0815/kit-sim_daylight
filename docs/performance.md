@@ -87,3 +87,15 @@ machine, seconds, best of 2; the USD rows need the `vs2022-usd` build):
 | Python values back: `np.load` / `np.loadtxt` | 0.004 / 0.13 |
 | TypeScript `.glb` (36 MB, 2M triangles): `fromGLB` / `toDmesh` / write | 0.04 / 0.03 / 0.18 |
 | TypeScript values back, 1M rows: `.npy` (`parseNpy`) / text (`parseValues`) | 0.22 / 1.2 |
+
+## Other GPUs
+
+The numbers above are an RTX 2060 (Turing, compute capability 7.5). The same exe runs on any NVIDIA GPU of 7.5 or newer
+without a rebuild: the OptiX programs are OptiX-IR (`compute_75`) that the driver compiles for the installed card at
+startup (cached in `%LOCALAPPDATA%\NVIDIA\OptixCache`), and `src/gpu.cu` carries native `sm_75` code plus `compute_75`
+PTX (`DAYLIGHT_CUDA_ARCHITECTURES`, default `75-real;75-virtual`), which newer cards (RTX 30 / 40 / 50, A100, H100)
+compile once per card and driver (cached in `%APPDATA%\NVIDIA\ComputeCache`). A PTX-only build gives byte-identical
+`validate/golden.py` results, so newer cards compute the same numbers. Expect faster runs there (more RT cores, more
+memory bandwidth); launch sizes are measured per GPU, so the Windows 2 s TDR guard needs no tuning. GPUs older than
+Turing (Pascal, Maxwell, Volta) are not supported: the OptiX-IR targets 7.5. `-DDAYLIGHT_CUDA_ARCHITECTURES=native`
+builds for the build machine's card only (no PTX: that exe fails on any other card).

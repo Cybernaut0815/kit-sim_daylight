@@ -76,7 +76,13 @@ USD from C++, writing results back onto meshes and the full binding APIs: [docs/
 ## Build
 
 Core: VS 2022 (MSVC 14.44), CUDA 12.6, OptiX SDK 9.0 headers (`OPTIX_INSTALL_DIR`; runtime in the driver
-R570+), CMake 3.27+, git (FetchContent pulls earcut.hpp, and LightUSD for the USD build). An RTX GPU is needed to run.
+R570+), CMake 3.27+, git (FetchContent pulls earcut.hpp, and LightUSD for the USD build).
+
+To run: Windows 10/11 x64, an NVIDIA GPU of compute capability 7.5 or newer (Turing and later: GTX 16, RTX 20-50,
+A100, H100; RT cores make it fast, without them OptiX runs on the CUDA cores), an NVIDIA driver R570+ (OptiX 9.0) and
+the Microsoft VC++ 2015-2022 x64 runtime. Nothing from the CUDA toolkit or the OptiX SDK: cudart is linked statically
+and OptiX ships in the driver. The same exe runs on every such card without a rebuild (see
+[docs/performance.md](docs/performance.md#other-gpus)).
 
 ```
 cmake --preset vs2022 && cmake --build --preset release && ctest --preset release                 # build/RelWithDebInfo/daylight.exe
@@ -86,7 +92,16 @@ cd bindings/ts && npm install && npm run build && npm test                      
 ```
 
 The build compiles `src/trace_dev.cu` to OptiX-IR with `nvcc -optix-ir -arch=compute_75` and embeds it; the rest is
-plain C++17 (`/W4 /WX`) plus one CUDA host file. The default build has no USD / glTF dependency.
+plain C++17 (`/W4 /WX`) plus one CUDA host file, `src/gpu.cu`, built for `DAYLIGHT_CUDA_ARCHITECTURES` (default
+`75-real;75-virtual`: native code for Turing, portable PTX for every newer card; `-DDAYLIGHT_CUDA_ARCHITECTURES=...`
+overrides it). The default build has no USD / glTF dependency.
+
+Deployment: Windows only today (VS 2022 presets, MSVC flags, a few Windows calls in the server). Containers on WSL2
+(Podman / Docker) cannot run it yet: CUDA works there, but OptiX is not part of NVIDIA's WSL driver (on driver 621.01
+`C:\Windows\System32\lxss\lib\libnvoptix.so.1` is a stub without `optixQueryFunctionTable`; re-check after driver
+updates). A Linux GPU host (driver R570+, NVIDIA Container Toolkit, Turing+ GPU) is the supported container path; it
+needs a small port (~40 lines behind `if(MSVC)` / `#ifdef _WIN32`). Before offering it to third parties as a hosted
+service, note that the OptiX SDK licence restricts hosted / internet use and asks for notice before commercial use.
 
 ## Documentation
 
