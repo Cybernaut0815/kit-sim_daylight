@@ -233,6 +233,17 @@ describe('runRemote', () => {
     await expect(p).rejects.toThrow(/aborted/);
     expect(calls).toEqual(['POST http://h/jobs', 'GET http://h/jobs/j3?wait=25', 'DELETE http://h/jobs/j3']);
   });
+  it('an abort while the server makes the job still deletes it: the POST runs to its answer', async () => {
+    const ctrl = new AbortController(), calls: string[] = [];
+    const fetchMock = (async (url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204 });
+      calls.push(`${init?.method ?? 'GET'} ${url}`);
+      if (init?.method === 'POST') { expect(init.signal).toBeUndefined(); ctrl.abort(); return json({ id: 'j4', state: 'queued', position: 0 }, 202); }
+      return json({ id: 'j4', state: 'cancelled' });
+    }) as unknown as typeof fetch;
+    await expect(runRemote('http://h', { sensors: fromThree([box()]), signal: ctrl.signal, fetch: fetchMock })).rejects.toThrow(/abort/i);
+    expect(calls).toEqual(['POST http://h/jobs', 'DELETE http://h/jobs/j4']);
+  });
 });
 
 const liveUrl = process.env.DAYLIGHT_URL ?? '';

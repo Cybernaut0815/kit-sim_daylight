@@ -258,7 +258,8 @@ const uploaded = new Map<string, Set<string>>();
  * sent to that server yet goes up first, once, via `PUT <url>/mesh/<id>?name=<stem>`, so a re-run with other settings
  * sends no geometry; when the server answers 404 `{missing}` anyway (restarted, or it evicted the mesh) those go up
  * again before one retry. The job is then long-polled (`GET /jobs/<id>?wait=25`); `onStatus` sees every
- * queued / running state. Aborting `signal` cancels the job on the server (`DELETE /jobs/<id>`). `epw` is a Blob
+ * queued / running state. Aborting `signal` cancels the job on the server (`DELETE /jobs/<id>`), also one aborted
+ * while the server was making it (the POST itself is not aborted, so its id is always known). `epw` is a Blob
  * (uploaded) or `{ url }` (the server fetches it through its allowlisted proxy cache). `args` are CLI flags verbatim
  * (no files). `clientId` (header `X-Client-Id`) identifies this client for the per-client job limit. Rejects with the
  * server's text on 4xx / 5xx or a failed job. One Float64Array per element.
@@ -295,16 +296,19 @@ export async function runRemote(
     return fd;
   };
   await put(meshes.map((m) => m.id!).filter((id) => !sent.has(id))); // new meshes first: no 404 round trip
-  let res = await req('/jobs', { method: 'POST', body: body() });
+  // Not aborted: once the server has made the job its id is known, so an abort meanwhile still deletes it below.
+  const post = () => f(`${base}/jobs`, { method: 'POST', body: body(), headers });
+  let res = await post();
   if (res.status === 404) { // the server lost some (restart, eviction): put them again, retry once
     const { missing } = (await res.json()) as { missing: string[] };
     for (const id of missing) sent.delete(id);
     await put(missing);
-    res = await req('/jobs', { method: 'POST', body: body() });
+    res = await post();
   }
   if (!res.ok) throw new Error(`${base}/jobs failed (${res.status}): ${(await res.text()).trim()}`);
   let job = (await res.json()) as RemoteJob & Partial<RemoteManifest> & { values_b64?: string };
   try {
+    input.signal?.throwIfAborted(); // aborted while the job was being made
     while (job.state === 'queued' || job.state === 'running') {
       input.onStatus?.(job);
       const poll = await req(`/jobs/${encodeURIComponent(job.id)}?wait=25`);
